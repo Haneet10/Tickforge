@@ -1,0 +1,7 @@
+build/
+node_modules/
+web/dist/
+web/public/tickforge.wasm
+.DS_Store
+*.log
+.zig-cache/
