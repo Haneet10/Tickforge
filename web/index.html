@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#000000" />
+    <title>Tickforge · Live exchange simulator</title>
+    <meta
+      name="description"
+      content="A working stock exchange in your browser: a C++ matching engine compiled to WebAssembly, a market of simulated traders, and a trading terminal to trade against them."
+    />
+    <meta property="og:title" content="Tickforge · Live exchange simulator" />
+    <meta
+      property="og:description"
+      content="A C++ limit order book and matching engine running in WebAssembly, with simulated traders, flash crashes and a market-making bot."
+    />
+    <meta property="og:type" content="website" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  </head>
+  <body>
+    <div id="boot" class="boot" role="status" aria-live="polite">
+      <div class="boot-inner">
+        <svg class="boot-mark" viewBox="0 0 48 48" aria-hidden="true">
+          <path class="c-up" d="M9 6v6M9 30v10M6 12h6v18H6z" />
+          <path class="c-down" d="M24 10v8M24 34v6M21 18h6v16h-6z" />
+          <path class="c-up" d="M39 4v4M39 22v12M36 8h6v14h-6z" />
+        </svg>
+        <div class="boot-name">TICKFORGE</div>
+        <div id="boot-msg" class="boot-msg">Starting the matching engine</div>
+      </div>
+    </div>
+
+    <div id="app" class="app" hidden>
+      <header class="topbar">
+        <div class="brand" title="Tickforge">
+          <svg viewBox="0 0 48 48" aria-hidden="true">
+            <path class="c-up" d="M9 6v6M9 30v10M6 12h6v18H6z" />
+            <path class="c-down" d="M24 10v8M24 34v6M21 18h6v16h-6z" />
+            <path class="c-up" d="M39 4v4M39 22v12M36 8h6v14h-6z" />
+          </svg>
+          <span>TICKFORGE</span>
+        </div>
+
+        <div class="symbol">
+          <span class="ticker">TFX</span>
+          <span class="chip" title="Every price and trader here is simulated. No real market data is used.">SIMULATED</span>
+        </div>
+
+        <div class="quote">
+          <span id="q-last" class="q-last">—</span>
+          <span id="q-chg" class="q-chg">—</span>
+        </div>
+
+        <dl class="stats" id="stats">
+          <div><dt>Bid</dt><dd id="s-bid" class="up">—</dd></div>
+          <div><dt>Ask</dt><dd id="s-ask" class="down">—</dd></div>
+          <div><dt>Spread</dt><dd id="s-spread">—</dd></div>
+          <div class="hide-m"><dt>Volume</dt><dd id="s-vol">—</dd></div>
+          <div class="hide-m"><dt>VWAP</dt><dd id="s-vwap">—</dd></div>
+          <div class="hide-l"><dt>High</dt><dd id="s-high">—</dd></div>
+          <div class="hide-l"><dt>Low</dt><dd id="s-low">—</dd></div>
+          <div class="hide-l" title="Short-horizon volatility of the mid price, annualised"><dt>Volatility</dt><dd id="s-sigma">—</dd></div>
+        </dl>
+
+        <div class="controls">
+          <div class="clock" title="Simulated market time">
+            <span id="clock">09:30:00</span>
+          </div>
+          <div class="speed" role="group" aria-label="Simulation speed">
+            <button id="btn-pause" class="icon-btn" aria-label="Pause the market" title="Pause or resume (Space)">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path id="pause-icon" d="M4 3h3v10H4zM9 3h3v10H9z" /></svg>
+            </button>
+            <button class="seg" data-speed="1" title="Real time">1×</button>
+            <button class="seg" data-speed="4">4×</button>
+            <button class="seg" data-speed="16">16×</button>
+            <button class="seg" data-speed="64">64×</button>
+          </div>
+          <button id="btn-xray" class="toggle-btn" aria-pressed="true" title="X-ray shows what a real trader never sees: the stock's true value and who is behind every trade.">
+            <span class="dot"></span>X-RAY
+          </button>
+          <button id="btn-scenarios" class="btn ghost" aria-haspopup="true" aria-expanded="false">Scenarios</button>
+          <button id="btn-challenge" class="btn accent">Market-maker challenge</button>
+          <button id="btn-tour" class="icon-btn" aria-label="Take the tour" title="Take the tour">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M6.2 6.300c0-1 .8-1.700 1.800-1.700s1.800.7 1.800 1.600c0 1.400-1.800 1.400-1.800 2.900" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /><circle cx="8" cy="11.300" r=".8" /></svg>
+          </button>
+          <a id="link-github" class="icon-btn" href="https://github.com/Haneet10/Tickforge" target="_blank" rel="noopener" aria-label="Source code on GitHub" title="Source code on GitHub">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.500 4 1.800 8l3.700 4M10.500 4l3.700 4-3.700 4" fill="none" stroke="currentColor" stroke-width="1.400" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          </a>
+        </div>
+      </header>
+
+      <main class="grid" id="grid">
+        <div class="col col-main">
+          <section class="panel chart-panel" id="panel-chart" aria-label="Price chart">
+            <div class="panel-head">
+              <div class="seg-group" role="group" aria-label="Candle interval" id="tf-group">
+                <button class="seg" data-tf="1">1s</button>
+                <button class="seg" data-tf="5">5s</button>
+                <button class="seg" data-tf="15">15s</button>
+                <button class="seg" data-tf="60">1m</button>
+                <button class="seg" data-tf="300">5m</button>
+              </div>
+              <div class="legend" id="chart-legend" aria-live="off"></div>
+              <div class="head-right">
+                <button id="btn-live" class="btn tiny" hidden>Back to live</button>
+                <label class="check"><input type="checkbox" id="ov-vwap" checked /><span class="sw vwap"></span>VWAP</label>
+                <label class="check xray-only"><input type="checkbox" id="ov-value" checked /><span class="sw value"></span>True value</label>
+              </div>
+            </div>
+            <div class="chart-wrap">
+              <canvas id="chart" aria-label="Candlestick chart of the simulated stock"></canvas>
+              <div id="halt-banner" class="halt-banner" hidden></div>
+              <div id="toasts" class="toasts" aria-live="polite"></div>
+            </div>
+          </section>
+
+          <section class="panel dock-panel" id="panel-dock" aria-label="Account and tools">
+            <div class="tabs" role="tablist" id="dock-tabs">
+              <button role="tab" class="tab" data-tab="account" aria-selected="true">Account</button>
+              <button role="tab" class="tab" data-tab="orders" aria-selected="false">Orders <span id="tab-orders-n" class="count"></span></button>
+              <button role="tab" class="tab" data-tab="bot" aria-selected="false">Market-making bot</button>
+              <button role="tab" class="tab" data-tab="who" aria-selected="false">Who is trading</button>
+              <button role="tab" class="tab" data-tab="market" aria-selected="false">Market controls</button>
+            </div>
+            <div class="tab-body" id="dock-body"></div>
+          </section>
+        </div>
+
+        <div class="col col-book">
+          <section class="panel book-panel" id="panel-book" aria-label="Order book">
+            <div class="panel-head">
+              <h2>Order book</h2>
+              <label class="check" title="When armed, clicking a price sends a limit order straight away."><input type="checkbox" id="click-trade" /><span class="box"></span>Click to trade</label>
+            </div>
+            <div class="book-cols"><span>Price</span><span>Size</span><span>Total</span></div>
+            <div class="book" id="book">
+              <div class="book-side asks" id="book-asks"></div>
+              <div class="book-mid" id="book-mid"></div>
+              <div class="book-side bids" id="book-bids"></div>
+            </div>
+          </section>
+          <section class="panel depth-panel" id="panel-depth" aria-label="Market depth">
+            <div class="panel-head">
+              <h2>Depth</h2>
+              <div class="legend" id="depth-legend"></div>
+            </div>
+            <div class="depth-wrap"><canvas id="depth" aria-label="Cumulative depth chart"></canvas></div>
+          </section>
+        </div>
+
+        <div class="col col-trade">
+          <section class="panel ticket-panel" id="panel-ticket" aria-label="Order ticket"></section>
+          <section class="panel tape-panel" id="panel-tape" aria-label="Time and sales">
+            <div class="panel-head">
+              <h2>Trades</h2>
+              <div class="legend" id="tape-rate"></div>
+            </div>
+            <div class="tape-cols"><span>Time</span><span>Price</span><span>Size</span><span class="xray-only">Taker</span></div>
+            <div class="tape" id="tape"></div>
+          </section>
+        </div>
+      </main>
+
+      <footer class="statusbar">
+        <span id="st-engine"></span>
+        <span id="st-rate" class="hide-m"></span>
+        <span id="st-book" class="hide-m"></span>
+        <span class="spacer"></span>
+        <span id="st-seed"></span>
+        <button id="btn-about" class="link-btn">How it works</button>
+      </footer>
+    </div>
+
+    <div id="menu-scenarios" class="menu" hidden role="menu"></div>
+    <div id="modal-root"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -51,7 +51,8 @@ Market::Market(const Config& config)
   bot_ = add_agent<QuotingBot>(*this, next_rng());
   user_algo_ = add_agent<ExecutionAlgo>(*this, next_rng(), TraderId{0});
 
-  start(add_agent<RetailFlow>(*this, next_rng(), 48));
+  // Retail flow arrives once the dealers have had time to post their first quotes.
+  schedule(add_agent<RetailFlow>(*this, next_rng(), 48), 1500 * kMillisecond);
 
   // Market makers range from a tight, fast, small dealer to a wide, slow, large one.
   for (int i = 0; i < cfg_.market_makers; ++i) {

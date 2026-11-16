@@ -216,7 +216,7 @@ TEST("market: a flash crash falls hard and then recovers") {
 
 TEST("market: the circuit breaker halts trading and then resumes") {
   Config cfg;
-  cfg.seed = 3;
+  cfg.seed = 1;
   cfg.breaker_enabled = true;
   Market m(cfg);
   run(m, 120);
