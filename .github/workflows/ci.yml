@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: Engine tests (sanitizers) and benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests under AddressSanitizer and UndefinedBehaviorSanitizer
+        run: |
+          cmake -S engine -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTF_SANITIZE=ON
+          cmake --build build-asan --target tf_tests -j
+          ./build-asan/tf_tests
+      - name: Release build and benchmark
+        run: |
+          cmake -S engine -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+          ./build/tf_tests
+          ./build/tf_bench
+
+  site:
+    name: Build the terminal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Compile the engine to WebAssembly
+        run: |
+          pip install ziglang==0.17.1
+          ./scripts/build-wasm.sh
+      - name: Type-check and build
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    needs: [engine, site]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

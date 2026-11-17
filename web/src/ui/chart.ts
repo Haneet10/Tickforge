@@ -292,16 +292,25 @@ export class Chart {
     }
     ctx.font = `11px ${cssFont}`;
 
-    // The user's fills.
+    // The user's fills: one marker per candle and side, at the average price, so a
+    // busy bot does not bury the candles under hundreds of triangles.
     const fills = app.fills;
-    for (let n = Math.max(0, fills.length - 250); n < fills.length; n++) {
+    const groups = new Map<number, { pv: number; q: number }>();
+    for (let n = fills.length - 1; n >= 0; n--) {
       const f = fills[n];
       const idx = Math.floor(f.time / this.tf);
-      if (idx < leftIdx || idx > rightIdx) continue;
-      const x = xOf(idx), y = yOf(f.price);
-      const buy = f.side === Side.Buy;
+      if (idx < leftIdx) break;
+      if (idx > rightIdx) continue;
+      const key = idx * 2 + (f.side === Side.Buy ? 0 : 1);
+      const g = groups.get(key);
+      if (g) { g.pv += f.price * f.qty; g.q += f.qty; }
+      else groups.set(key, { pv: f.price * f.qty, q: f.qty });
+    }
+    ctx.strokeStyle = '#000';
+    for (const [key, g] of groups) {
+      const buy = key % 2 === 0;
+      const x = xOf((key - (buy ? 0 : 1)) / 2), y = yOf(g.pv / g.q);
       ctx.fillStyle = buy ? C.up : C.down;
-      ctx.strokeStyle = '#000';
       ctx.beginPath();
       if (buy) { ctx.moveTo(x, y + 2); ctx.lineTo(x - 5, y + 10); ctx.lineTo(x + 5, y + 10); }
       else { ctx.moveTo(x, y - 2); ctx.lineTo(x - 5, y - 10); ctx.lineTo(x + 5, y - 10); }

@@ -450,6 +450,7 @@ int Market::user_cancel_all() {
 }
 
 Result Market::user_flatten() {
+  user_algo_->stop();
   user_cancel_all();
   const int64_t pos = accounts_[0].position;
   if (pos == 0) return {};

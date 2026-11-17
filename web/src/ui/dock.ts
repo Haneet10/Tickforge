@@ -288,7 +288,6 @@ export class Dock {
     };
 
     const res = h('div.v'), half = h('div.v'), quotes = h('div.v'), inv = h('div.v');
-    const fRes = h('b'), fHalf = h('b');
     const studyCanvas = h('canvas');
     const studyBtn = h('button.btn.tiny', { type: 'button' }, 'Run study');
     const studyNote = h('span.hint', 'Runs the bot through 12 different markets at each of 7 risk settings, off screen, and plots what it earned against how much that varied.');
@@ -405,8 +404,8 @@ export class Dock {
         slider('Horizon T', 'How far ahead the bot worries about price risk, in seconds.', 2, 60, 1, () => app.bot.horizon, (v) => (app.bot.horizon = v), (v) => `${v}s`)),
       h('div', { style: 'display:grid;gap:9px;align-content:start' },
         h('div.formula', { title: 'Avellaneda and Stoikov, High-frequency trading in a limit order book (2008)' },
-          h('div', 'reservation  r = mid − q·γ·σ²·T  = ', fRes),
-          h('div', 'half spread  δ = γσ²T/2 + ln(1+γ/κ)/γ  = ', fHalf)),
+          h('div', 'r = mid − q·γ·σ²·T'),
+          h('div', 'δ = γσ²T/2 + ln(1+γ/κ)/γ')),
         h('div.readout',
           h('div.kv', h('span.label', 'Reservation price'), res),
           h('div.kv', h('span.label', 'Half spread'), half),
@@ -429,12 +428,8 @@ export class Dock {
           setText(res, px(s.botReservation));
           setText(half, `${s.botHalfSpread.toFixed(2)} ticks`);
           setText(quotes, `${s.botBid ? px(s.botBid) : '—'} / ${s.botAsk ? px(s.botAsk) : '—'}`);
-          setText(fRes, px(s.botReservation));
-          setText(fHalf, `${s.botHalfSpread.toFixed(2)} ticks`);
         } else {
           for (const e of [res, half, quotes]) setText(e, '—');
-          setText(fRes, '…');
-          setText(fHalf, '…');
         }
         setText(inv, `${signed(s.position / app.bot.size, 1)} clips`);
         inv.className = `v ${tone(s.position)}`;

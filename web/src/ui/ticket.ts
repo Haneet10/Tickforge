@@ -15,7 +15,7 @@ export class Ticket {
   private buyBtn = h('button.buy', { type: 'button', 'aria-pressed': 'true' }, 'BUY');
   private sellBtn = h('button.sell', { type: 'button', 'aria-pressed': 'false' }, 'SELL');
   private kindBtns: Record<Kind, HTMLButtonElement>;
-  private qtyIn = h('input', { type: 'number', inputmode: 'numeric', min: '1', step: '10', value: '100', 'aria-label': 'Quantity in shares' });
+  private qtyIn = h('input', { type: 'number', inputmode: 'numeric', min: '1', max: '100000', step: '10', value: '100', 'aria-label': 'Quantity in shares' });
   private priceIn = h('input', { type: 'number', inputmode: 'decimal', step: '0.01', 'aria-label': 'Limit price in dollars' });
   private secsIn = h('input', { type: 'number', inputmode: 'numeric', min: '5', step: '5', value: '60', 'aria-label': 'Seconds to spread the order over' });
   private tifSel = h('select.sel', { 'aria-label': 'Time in force' },
@@ -93,7 +93,7 @@ export class Ticket {
 
   qty(): number {
     const v = Math.floor(Number(this.qtyIn.value));
-    return Number.isFinite(v) && v > 0 ? Math.min(v, 1_000_000) : 0;
+    return Number.isFinite(v) && v > 0 ? Math.min(v, 100_000) : 0;
   }
   private priceTicks(): number {
     return Math.round(Number(this.priceIn.value) * 100);
