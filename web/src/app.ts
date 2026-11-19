@@ -101,7 +101,7 @@ export class App {
   orders: OpenOrder[] = [];
   marks: ChartMark[] = [];
 
-  speed = 4;
+  speed = 1;
   paused = false;
   xray = true;
   /** When set, UI that could leak hidden information or change the market is locked. */

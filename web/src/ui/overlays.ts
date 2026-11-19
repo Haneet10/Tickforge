@@ -104,7 +104,7 @@ interface Step {
 
 const STEPS: Step[] = [
   { target: 'panel-chart', title: 'A market that is actually running', text: 'Each candle is built from real trades between simulated traders, matched by a C++ engine running in this tab. Scroll to zoom, drag to look back, and pick a candle interval at the top left.' },
-  { target: 'panel-book', title: 'The order book', text: 'Everyone waiting to trade. Green bids want to buy, red offers want to sell, and the gap between them is the spread. A price only moves when one side gets used up. Click any price to load it into the ticket.' },
+  { target: 'panel-book', title: 'The order book', text: 'Everyone waiting to trade. Each row is one price and stays put while the market moves through it. Green bids want to buy, red offers want to sell, and the grey rows between them are the spread. Click any price to load it into the ticket.' },
   { target: 'panel-ticket', title: 'Trade against them', text: 'A market order trades now and pays the spread. A limit order names its price and waits in the queue. Before you send anything, the ticket shows what it will cost. Try a 5,000 share market order and watch it eat through the book.' },
   { target: 'panel-depth', title: 'Depth is what a big order costs', text: 'The curve shows how many shares sit between here and each price. Hover it to see how far a given size would push the price. Thin book, big impact.' },
   { target: 'btn-xray', title: 'X-ray', text: 'Things no real trader can see: the amber line on the chart is what the stock is truly worth, and the tape shows which kind of trader was behind each trade. Switch it off to trade blind like everyone else.', before: (app) => app.setXray(true) },
@@ -233,7 +233,7 @@ export class Challenge {
       body: [
         h('p', 'For three minutes ', h('b', 'you are the market maker'), '. Keep a bid and an offer in the book, earn the spread when both sides trade, and do not get stuck holding a position when the price runs.'),
         h('ul',
-          h('li', h('b', 'Click to trade is armed.'), ' Click a green price to bid there, a red price to offer there. Right-click a price to cancel your orders at it.'),
+          h('li', h('b', 'Click to trade is armed.'), ' Click any price below the middle of the book to bid there, above it to offer there. Prices inside the spread work too, and get you to the front. Right-click a price to cancel your orders at it.'),
           h('li', h('b', 'You trade blind.'), ' X-ray is off. News will hit at some point, and the informed traders will know before you do.'),
           h('li', h('b', 'Quote both sides at least 60% of the time'), ' or it does not count as market making.'),
           h('li', h('b', 'At the bell your position is closed at market'), ', whatever that costs.')),
