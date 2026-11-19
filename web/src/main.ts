@@ -9,6 +9,7 @@ import { Dock } from './ui/dock';
 import { Ladder } from './ui/ladder';
 import { Challenge, mountToasts, openAbout, Tour } from './ui/overlays';
 import { Tape } from './ui/tape';
+import { TrendTone } from './ui/motion';
 import { Ticket } from './ui/ticket';
 
 async function main(): Promise<void> {
@@ -29,6 +30,7 @@ async function main(): Promise<void> {
   app.setXray(true);
 
   const chart = new Chart(app, $<HTMLCanvasElement>('chart'), $('chart-legend'), $('btn-live'));
+  (window as any).tickforgeChart = chart; // for the smoothness checks in the browser console
   const ticket = new Ticket(app);
   const ladder = new Ladder(app, () => ticket.qty() || 100);
   const depth = new Depth(app, $<HTMLCanvasElement>('depth'), $('depth-legend'));
@@ -119,18 +121,16 @@ async function main(): Promise<void> {
     vwap: $('s-vwap'), high: $('s-high'), low: $('s-low'), sigma: $('s-sigma'), clock: $('clock'),
     engine: $('st-engine'), rate: $('st-rate'), book: $('st-book'), seed: $('st-seed'), halt: $('halt-banner'),
   };
-  let prevLast = 0;
-  let lastTone = 'up';
+  // Colour the last price by its trend, not by every bid-ask bounce.
+  const lastTone = new TrendTone(3);
+  app.on('restart', () => lastTone.reset());
   let msgMark = { time: 0, messages: 0, rate: 0 };
 
   const slowUi = () => {
     const s = app.s;
-    if (s.last !== prevLast) {
-      lastTone = s.last >= prevLast ? 'up' : 'down';
-      prevLast = s.last;
-    }
     setText(el.last, px(s.last));
-    el.last.className = `q-last ${lastTone}`;
+    const lastCls = `q-last ${lastTone.push(s.last)}`;
+    if (el.last.className !== lastCls) el.last.className = lastCls;
     const change = s.last - s.open;
     setText(el.chg, `${signed(change / 100, 2)}  ${pct(change / s.open)}`);
     el.chg.className = `q-chg ${change >= 0 ? 'up' : 'down'}`;
@@ -172,7 +172,9 @@ async function main(): Promise<void> {
     challenge.update();
     chart.draw();
     depth.draw();
-    if (now - slowAt > 80) {
+    // Numbers and tables refresh five times a second: fast enough to feel live,
+    // slow enough to read. The canvases above glide every frame.
+    if (now - slowAt > 200) {
       slowAt = now;
       slowUi();
     }

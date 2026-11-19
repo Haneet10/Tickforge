@@ -6,6 +6,7 @@ import type { App } from '../app';
 import { clamp, cssVar, fitCanvas, setText } from '../dom';
 import { Side } from '../engine';
 import { clock, compact, px } from '../fmt';
+import { ease } from './motion';
 
 const AXIS_W = 64;
 const AXIS_H = 20;
@@ -28,15 +29,23 @@ export class Chart {
 
   private ctx: CanvasRenderingContext2D;
   private candleW = 9;
-  private offset = 0; // whole candles scrolled back from live
+  private offset = 0; // candles scrolled back from live (fractional while dragging)
   private hover: { x: number; y: number } | null = null;
   private drag: { x: number; offset: number } | null = null;
   private pinch: { dist: number; w: number } | null = null;
   private pointers = new Map<number, { x: number; y: number }>();
   private col: Record<string, string> = {};
-  private yLo = 0;
-  private yHi = 1;
+  private yLo = NaN;
+  private yHi = NaN;
   private lastLegend = '';
+  private legendAt = 0;
+  // Smoothed state, so the picture glides instead of ticking.
+  private lastFrame = 0;
+  private scroll = NaN; // eased index of the live candle
+  private liveIdx = -1;
+  private liveC = NaN; // eased close of the live candle
+  liveUp = true;
+  private lastY = NaN; // eased last-price line
 
   constructor(
     private app: App,
@@ -98,9 +107,9 @@ export class Chart {
     this.liveBtn.hidden = true;
   }
   private setOffset(v: number): void {
-    const maxBack = Math.max(0, Math.floor(this.app.history.n / this.tf) - 10);
+    const maxBack = Math.max(0, Math.floor(this.app.history.n / this.tf) - 10) + RIGHT_PAD;
     this.offset = clamp(v, 0, maxBack);
-    this.liveBtn.hidden = this.offset < 1;
+    this.liveBtn.hidden = this.offset < RIGHT_PAD + 1;
   }
   private pan(candles: number): void {
     this.setOffset(this.offset - candles);
@@ -110,6 +119,8 @@ export class Chart {
   }
   setTf(tf: number): void {
     this.tf = tf;
+    this.scroll = NaN;
+    this.liveIdx = -1;
     this.goLive();
   }
 
@@ -143,18 +154,44 @@ export class Chart {
     const volH = Math.round(plotH * VOLUME_FRACTION);
     const priceH = plotH - volH - 6;
     const cw = this.candleW;
-    const offset = Math.round(this.offset);
+    const now = performance.now();
+    const dt = this.lastFrame ? Math.min(0.1, (now - this.lastFrame) / 1000) : 0.016;
+    this.lastFrame = now;
     const lastIdx = Math.floor(hist.n / this.tf);
-    const rightIdx = lastIdx - offset + (offset === 0 ? RIGHT_PAD : 0);
-    const visible = Math.ceil(plotW / cw) + 1;
+    // When a new candle opens, glide the chart one slot left instead of jumping.
+    if (!Number.isFinite(this.scroll) || Math.abs(lastIdx - this.scroll) > 3) this.scroll = lastIdx;
+    else this.scroll = ease(this.scroll, lastIdx, dt, 0.16);
+    const rightF = this.scroll + RIGHT_PAD - this.offset;
+    const rightIdx = Math.ceil(rightF);
+    const visible = Math.ceil(plotW / cw) + 2;
     const leftIdx = rightIdx - visible + 1;
-    const xOf = (idx: number) => plotW - (rightIdx - idx + 0.5) * cw;
+    const xOf = (idx: number) => plotW - (rightF - idx + 0.5) * cw;
+
+    // The live candle's close follows trades through a short filter. Prints
+    // bounce between the bid and the ask, and drawing every one makes the
+    // candle flicker. Its colour only changes once the move is clear.
+    const liveRaw = this.candle(lastIdx);
+    if (liveRaw) {
+      if (this.liveIdx !== lastIdx) {
+        if (this.liveIdx >= 0 && lastIdx === this.liveIdx + 1) {
+          const prev = this.candle(this.liveIdx);
+          if (prev) this.liveUp = prev.c !== prev.o ? prev.c > prev.o : this.liveUp;
+        }
+        this.liveIdx = lastIdx;
+        this.liveC = liveRaw.c;
+      }
+      this.liveC = clamp(ease(this.liveC, liveRaw.c, dt, 0.45), liveRaw.l, liveRaw.h);
+      const d = this.liveC - liveRaw.o;
+      if (d > 0.9) this.liveUp = true;
+      else if (d < -0.9) this.liveUp = false;
+    }
 
     // Gather candles and the visible range.
     const candles: (Candle | null)[] = [];
     let lo = Infinity, hi = -Infinity, vmax = 1;
     for (let i = leftIdx; i <= rightIdx; i++) {
       const c = i >= 0 && i <= lastIdx ? this.candle(i) : null;
+      if (c && i === lastIdx && Number.isFinite(this.liveC)) c.c = this.liveC;
       candles.push(c);
       if (!c) continue;
       if (c.l < lo) lo = c.l;
@@ -166,9 +203,14 @@ export class Chart {
     lo -= pad;
     hi += pad;
     // Ease the scale so it does not twitch with every tick.
-    const k = this.drag || Math.abs(this.yLo - lo) > (hi - lo) * 2 ? 1 : 0.25;
-    this.yLo += (lo - this.yLo) * k;
-    this.yHi += (hi - this.yHi) * k;
+    if (!Number.isFinite(this.yLo) || Math.abs(this.yLo - lo) > (hi - lo) * 2 || Math.abs(this.yHi - hi) > (hi - lo) * 2) {
+      this.yLo = lo;
+      this.yHi = hi;
+    } else {
+      const tau = this.drag ? 0.08 : 0.45;
+      this.yLo = ease(this.yLo, lo, dt, tau);
+      this.yHi = ease(this.yHi, hi, dt, tau);
+    }
     const yLo = this.yLo, yHi = this.yHi;
     const yOf = (p: number) => 4 + (1 - (p - yLo) / (yHi - yLo)) * (priceH - 4);
     const pOf = (y: number) => yLo + (1 - (y - 4) / (priceH - 4)) * (yHi - yLo);
@@ -225,7 +267,7 @@ export class Chart {
       const c = candles[n];
       if (!c) continue;
       const x = xOf(leftIdx + n);
-      const up = c.c >= c.o;
+      const up = leftIdx + n === lastIdx ? this.liveUp : c.c >= c.o;
       if (c.halted) {
         ctx.fillStyle = 'rgba(255,178,36,0.07)';
         ctx.fillRect(x - cw / 2, 0, cw, plotH);
@@ -242,7 +284,8 @@ export class Chart {
       ctx.stroke();
       const y0 = yOf(Math.max(c.o, c.c));
       const y1 = yOf(Math.min(c.o, c.c));
-      ctx.fillRect(Math.round(x - bodyW / 2), Math.round(y0), bodyW, Math.max(1, Math.round(y1 - y0)));
+      if (leftIdx + n === lastIdx) ctx.fillRect(Math.round(x - bodyW / 2), y0, bodyW, Math.max(1, y1 - y0));
+      else ctx.fillRect(Math.round(x - bodyW / 2), Math.round(y0), bodyW, Math.max(1, Math.round(y1 - y0)));
     }
 
     // Lines that follow the candles: VWAP, true value, the bot's quotes.
@@ -345,8 +388,9 @@ export class Chart {
 
     // Last price.
     const s = app.s;
-    const lastUp = hist.close[hist.n] >= hist.open[Math.floor(hist.n / this.tf) * this.tf];
-    const yLast = yOf(s.last);
+    const lastUp = this.liveUp;
+    this.lastY = ease(this.lastY, Number.isFinite(this.liveC) ? this.liveC : s.last, dt, 0.12);
+    const yLast = yOf(this.lastY);
     if (yLast >= 0 && yLast <= priceH) {
       ctx.strokeStyle = lastUp ? C.up : C.down;
       ctx.globalAlpha = 0.55;
@@ -364,7 +408,7 @@ export class Chart {
     let legendIdx = lastIdx;
     if (this.hover && this.hover.x < plotW && this.hover.y < plotH && !this.drag) {
       const hx = this.hover.x, hy = this.hover.y;
-      const idx = clamp(Math.round(rightIdx - (plotW - hx) / cw + 0.5), Math.max(0, leftIdx), lastIdx);
+      const idx = clamp(Math.round(rightF - (plotW - hx) / cw + 0.5), Math.max(0, leftIdx), lastIdx);
       legendIdx = idx;
       const x = Math.round(xOf(idx)) + 0.5;
       ctx.strokeStyle = C.faint;
@@ -385,8 +429,11 @@ export class Chart {
       ctx.fillText(label, clamp(x, tw / 2, plotW - tw / 2), plotH + AXIS_H / 2 + 1);
     }
     const lc = this.candle(legendIdx);
-    if (lc) {
-      const tone = lc.c >= lc.o ? 'up' : 'down';
+    if (lc && legendIdx === lastIdx && !this.hover && now - this.legendAt < 250) {
+      // The live legend refreshes four times a second; the numbers are unreadable faster.
+    } else if (lc) {
+      this.legendAt = now;
+      const tone = (legendIdx === lastIdx ? this.liveUp : lc.c >= lc.o) ? 'up' : 'down';
       const html =
         `<span class="k">O</span><b class="${tone}">${px(lc.o)}</b><span class="k">H</span><b class="${tone}">${px(lc.h)}</b>` +
         `<span class="k">L</span><b class="${tone}">${px(lc.l)}</b><span class="k">C</span><b class="${tone}">${px(lc.c)}</b>` +
