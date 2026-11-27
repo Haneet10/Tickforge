@@ -11,6 +11,7 @@ import { Challenge, mountToasts, openAbout, Tour } from './ui/overlays';
 import { Tape } from './ui/tape';
 import { TrendTone } from './ui/motion';
 import { Ticket } from './ui/ticket';
+import { Lab } from './lab/lab';
 
 async function main(): Promise<void> {
   const params = new URLSearchParams(location.search);
@@ -99,6 +100,22 @@ async function main(): Promise<void> {
   document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.contains(e.target as Node) && e.target !== menuBtn) closeMenu(); });
 
   $('btn-challenge').addEventListener('click', () => challenge.intro());
+
+  // Strategy lab: a full-screen view over the terminal, also reachable at #lab.
+  const appEl = $('app');
+  const labBtn = $('btn-lab');
+  const lab = new Lab(() => {
+    appEl.inert = false;
+    labBtn.focus({ preventScroll: true });
+  });
+  const openLab = () => {
+    if (app.challengeActive) return app.toast('The lab is closed during the challenge', 'warn');
+    appEl.inert = true;
+    lab.open();
+  };
+  labBtn.addEventListener('click', openLab);
+  window.addEventListener('hashchange', () => (location.hash === '#lab' ? openLab() : lab.close()));
+  if (location.hash === '#lab') openLab();
   $('btn-tour').addEventListener('click', () => tour.start());
   $('btn-about').addEventListener('click', () => openAbout(app));
 
@@ -107,7 +124,7 @@ async function main(): Promise<void> {
     if (e.key === 'Escape') closeMenu();
     const t = e.target as HTMLElement;
     if (t.closest('input, select, textarea, [role="dialog"]') || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (document.querySelector('.scrim, .tour-card')) return;
+    if (document.querySelector('.scrim, .tour-card') || lab.isOpen) return;
     if (e.key === ' ') { e.preventDefault(); pauseBtn.click(); }
     else if (e.key === 'f' || e.key === 'F') app.flatten();
     else if (e.key === 'c' || e.key === 'C') app.cancelAll();
@@ -191,7 +208,7 @@ async function main(): Promise<void> {
 
   let toured = false;
   try { toured = localStorage.getItem('tickforge.toured') === '1'; } catch { /* private mode */ }
-  if (!toured && !params.has('notour') && window.innerWidth > 900) setTimeout(() => tour.start(), 900);
+  if (!toured && !params.has('notour') && !lab.isOpen && window.innerWidth > 900) setTimeout(() => tour.start(), 900);
 }
 
 main();

@@ -30,6 +30,7 @@ jobs:
           cmake --build build -j
           ./build/tf_tests
           ./build/tf_bench
+          ./build/tf_backtest --seeds 10
 
   site:
     name: Build the terminal

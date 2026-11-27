@@ -133,13 +133,42 @@ The identity holds exactly and is asserted in the tests.
 
 ## 5. WebAssembly and the terminal
 
-The engine is compiled with clang (through zig's toolchain) to a standalone `wasm32-wasi` reactor module. There is no Emscripten runtime and no generated glue. The browser calls about thirty plain C functions; bulk data (depth, bars, tape, fills) is copied into buffers that JavaScript reads as typed arrays. The module is 81 KB.
+The engine is compiled with clang (through zig's toolchain) to a standalone `wasm32-wasi` reactor module. There is no Emscripten runtime and no generated glue. The browser calls about thirty plain C functions; bulk data (depth, bars, tape, fills) is copied into buffers that JavaScript reads as typed arrays. The module is 96 KB.
 
 The terminal is TypeScript with no framework. The chart and depth views are drawn on canvas every animation frame; tables update at about 12 Hz and only touch the DOM when a value changes. One frame of engine work at 64 times real speed takes about 0.2 ms, which leaves the whole frame budget for drawing.
 
 On load the page simulates 45 minutes of trading so that the chart opens with history. That takes about 50 ms.
 
-## 6. What this is not
+## 6. Backtesting
+
+### The runner
+
+`run_backtest` (in `engine/src/backtest.cpp`) builds a fresh market from a seed, lets it trade for five minutes so the book and the volatility estimates settle, resets the user's account, and hands control to a `Strategy` for the session. The market pauses every `interval()` (100 to 250 ms for the built-in strategies) and calls `tick()`; between ticks the strategy's resting orders sit in the book like anyone else's, so the interval is also its reaction time. Equity is sampled once a simulated second. At the end, open orders are cancelled and any position is closed with a market order, so the result includes the cost of getting out.
+
+Scenarios fire at a fixed point in the session with the same sizes as the terminal's menu. Everything is deterministic: the same seed, parameters and scenario always produce the same result, which the tests assert. Two strategies run on the same seed see the same order flow until their own orders change it, which makes paired comparison with a few dozen seeds meaningful.
+
+### Execution
+
+The three signal strategies decide a target position and share one execution routine. Aggressive mode sends an immediate-or-cancel order at the far touch: it trades now and pays the spread and the taker fee. Passive mode keeps one post-only order at the near touch, re-pegged when the touch moves and left alone otherwise so it keeps its queue position: it earns the spread and the maker rebate, but only if someone trades with it. The imbalance strategy shows why this matters: its signal predicts a fraction of a tick, enough to be worth acting on passively and not enough to pay for crossing the spread.
+
+### Metrics
+
+| Metric | Definition |
+|---|---|
+| P&L | Mark-to-mid equity after fees and the closing trade, split exactly into spread, inventory and fees (section 4) |
+| Sharpe | Mean over sample standard deviation of one-second P&L changes, times √(252 × 23,400). One-second sampling of a strategy that trades every few seconds gives large annualised numbers, as it does for real high-frequency desks |
+| Max drawdown | Largest fall from a running peak of the equity path |
+| Maker share | Share of traded volume that was passive |
+| Markout | Mid 1, 5 and 30 s after each fill against the fill price, in ticks per share, signed so positive is favourable |
+| t-statistic | Mean session P&L over its standard error, √n · mean / s. Around 2 or more, the edge is unlikely to be chance |
+
+The summary functions are tested against hand calculations (`engine/tests/test_backtest.cpp`), and the browser's summaries use the same definitions.
+
+### In the browser
+
+The backtester is part of the WebAssembly module (`tf_backtest` in `engine/wasm/api.cpp`). The lab runs it in a Web Worker with its own engine instance, so the live market and the terminal's animation are never blocked. A ten-minute session takes 15 to 20 ms; 100 sessions take under two seconds. Results arrive one session at a time; each new equity curve fades in over 450 ms, the numbers refresh four times a second, and the chart's scale eases to its new range instead of jumping.
+
+## 7. What this is not
 
 Tickforge is a simulation. The agents are simple models, not calibrated to any real stock, and the results are not evidence that any strategy would make money in a real market. Its purpose is to show the mechanics of a limit order market accurately and to make them visible.
 

@@ -17,8 +17,39 @@ Nothing on the screen is a recording or a random walk. Every candle is built fro
 | **See who is on the other side** | X-ray mode shows the true value of the stock and which type of trader took each trade. A live table shows who is making money from whom. |
 | **Run a market-making bot** | An Avellaneda-Stoikov quoting bot trades your account. A risk study replays it across 84 simulated sessions to show the trade-off between profit and risk. |
 | **Take the challenge** | Three minutes as the market maker, trading blind, with news hitting at some point. You are scored against the bot playing the same market from the same seed. |
+| **Backtest strategies** | The Strategy lab runs four strategies through dozens of simulated sessions on a background thread and shows every outcome, not one lucky run. |
 
 ![A flash crash, and who paid for it](docs/img/flash-crash.png)
+
+## Strategy lab
+
+**[Open the lab](https://haneet10.github.io/Tickforge/#lab)**
+
+![The Strategy lab: a trend follower through 25 flash crashes](docs/img/lab.png)
+
+Pick a strategy, set its parameters, choose a market (calm, flash crash, news, whale, drought, volatility storm) and run it across 10 to 100 sessions. Each session is a fresh market from its own seed, so the lab shows the spread of outcomes: an equity curve per session with the median and the 10 to 90% band, where each session finished, and where the money came from. *Compare all* runs every strategy on the same seeds, so the leaderboard compares strategies rather than luck.
+
+| Strategy | Edge it is after | Default execution |
+|---|---|---|
+| Avellaneda-Stoikov maker | Earns the spread from uninformed flow | Quotes both sides |
+| Trend follower | Fast/slow moving-average crossover, scaled by volatility | Crosses the spread |
+| Mean reversion | Fades prices stretched from their moving average | Joins the touch |
+| Book imbalance | Bid size against ask size near the touch, held for seconds | Joins the touch |
+
+The results tell the stories you would expect from a real market. In a calm market the maker and the passive imbalance strategy earn a small, reliable edge (t-statistics of about 8 and 12 over 25 sessions) and the trend follower loses its spread costs. Through a flash crash the trend follower makes about $1,500 a session in 24 of 25 sessions, while mean reversion buys the falling knife and loses in nearly every one. Flip the imbalance strategy to cross the spread and the same signal loses money: the signal is real but smaller than the cost of trading on it.
+
+The same backtester runs from the command line:
+
+```
+$ ./build/tf_backtest --seeds 25 --scenario crash
+  strategy                    mean P&L    stdev   t-stat    win  Sharpe   max DD    volume   maker   markout
+  Avellaneda-Stoikov maker         -65      206    -1.57     56    17.5      198      8371     100     -0.07
+  Trend follower                  1548      750    10.32     96   320.2      534      2920       0     16.76
+  Mean reversion                 -1156      465   -12.43      0  -328.8     1722      2984     100     -8.57
+  Book imbalance                   129      129     5.03     88   111.1      123     28475     100      0.65
+```
+
+`tf_backtest --list` prints every strategy's parameters; `--set window=120` changes one and `--runs` prints each session's P&L split.
 
 ## The engine
 
@@ -29,8 +60,8 @@ The matching engine is about 2,400 lines of C++17 with no dependencies.
 | Throughput, native | 38 million order operations per second on one core |
 | Latency, native | 26 ns mean, 56 ns median, 148 ns at the 99th percentile |
 | Throughput, in the browser | 5 to 9 million simulated messages per second (shown live in the status bar) |
-| WebAssembly module | 81 KB, no generated JavaScript glue |
-| Tests | 37 tests, 3.9 million checks, run under AddressSanitizer and UndefinedBehaviorSanitizer |
+| WebAssembly module | 96 KB, no generated JavaScript glue |
+| Tests | 48 tests, 3.9 million checks, run under AddressSanitizer and UndefinedBehaviorSanitizer |
 
 How it gets there:
 
@@ -78,6 +109,7 @@ cmake --build build
 ./build/tf_tests
 ./build/tf_bench
 ./build/tf_simulate 600 7 crash     # ten simulated minutes, seed 7, with a flash crash
+./build/tf_backtest                 # every strategy across 20 sessions
 ```
 
 The web terminal (needs Python and Node 20 or newer):
@@ -91,14 +123,16 @@ cd web && npm ci && npm run dev
 ## Layout
 
 ```
-engine/include/tf   order book, price index, market, agents
+engine/include/tf   order book, price index, market, agents, backtester
 engine/src          implementation
 engine/wasm         the C interface the browser calls
 engine/tests        unit tests, reference book, fuzzer, market tests
 engine/bench        throughput and latency benchmark
-engine/tools        headless simulator for the command line
+engine/tools        headless simulator and backtester for the command line
 web/src             the terminal: TypeScript and canvas, no framework
+web/src/lab         the Strategy lab and its Web Worker
 docs/DESIGN.md      design notes
+docs/roadmap.md     what is being built next
 ```
 
 More detail on the data structures, the simulation and the trade-offs is in [docs/DESIGN.md](docs/DESIGN.md).

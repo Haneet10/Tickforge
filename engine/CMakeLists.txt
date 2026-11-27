@@ -13,7 +13,8 @@ option(TF_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" 
 add_library(tickforge
   src/order_book.cpp
   src/market.cpp
-  src/agents.cpp)
+  src/agents.cpp
+  src/backtest.cpp)
 target_include_directories(tickforge PUBLIC include)
 target_compile_options(tickforge PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -27,7 +28,8 @@ add_executable(tf_tests
   tests/test_price_index.cpp
   tests/test_order_book.cpp
   tests/test_fuzz.cpp
-  tests/test_market.cpp)
+  tests/test_market.cpp
+  tests/test_backtest.cpp)
 target_link_libraries(tf_tests PRIVATE tickforge)
 
 add_executable(tf_bench bench/bench_book.cpp)
@@ -35,6 +37,9 @@ target_link_libraries(tf_bench PRIVATE tickforge)
 
 add_executable(tf_simulate tools/simulate.cpp)
 target_link_libraries(tf_simulate PRIVATE tickforge)
+
+add_executable(tf_backtest tools/backtest.cpp)
+target_link_libraries(tf_backtest PRIVATE tickforge)
 
 enable_testing()
 add_test(NAME engine COMMAND tf_tests)

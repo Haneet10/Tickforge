@@ -24,6 +24,7 @@ fi
   "$root/engine/src/order_book.cpp" \
   "$root/engine/src/market.cpp" \
   "$root/engine/src/agents.cpp" \
+  "$root/engine/src/backtest.cpp" \
   "$root/engine/wasm/api.cpp" \
   -Wl,--strip-all \
   -o "$out"

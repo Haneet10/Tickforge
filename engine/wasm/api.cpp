@@ -9,6 +9,10 @@
 #include <cstdint>
 #include <memory>
 
+#include <string>
+#include <vector>
+
+#include "tf/backtest.hpp"
 #include "tf/market.hpp"
 
 using namespace tf;
@@ -285,5 +289,69 @@ void TF_EXPORT(tf_dials)(double activity, double liquidity, double volatility, i
 }
 
 void TF_EXPORT(tf_breaker)(int enabled, double band) { g_market->set_breaker(enabled != 0, band); }
+
+// ----------------------------------------------------------- backtests ----
+//
+// Backtests build their own Market, so they never disturb the live one.
+
+namespace {
+std::string g_catalog;
+std::vector<double> g_backtest;
+constexpr int kBacktestHeader = 24;
+}  // namespace
+
+/// The strategy catalogue as UTF-8 JSON; length from tf_catalog_len().
+const char* TF_EXPORT(tf_catalog)() {
+  if (g_catalog.empty()) g_catalog = strategy_catalog_json();
+  return g_catalog.c_str();
+}
+int TF_EXPORT(tf_catalog_len)() {
+  tf_catalog();
+  return static_cast<int>(g_catalog.size());
+}
+
+/// Run one backtest. Writes a header of kBacktestHeader doubles followed by
+/// three series of n+1 samples each (equity $, position, mid $), where n is the
+/// session length in seconds. Header: n, pnl, spread, inventory, fees, sharpe,
+/// max drawdown, volume, trades, maker share, max position, time in market,
+/// markout 1s, 5s, 30s, market move, seed.
+double* TF_EXPORT(tf_backtest)(int strategy, double seed, double warmup, double duration, int scenario,
+                               double scenario_at, double p0, double p1, double p2, double p3, double p4) {
+  BacktestSpec spec;
+  spec.seed = static_cast<uint64_t>(std::max(1.0, seed));
+  spec.warmup = std::clamp(warmup, 0.0, 3600.0);
+  spec.duration = std::clamp(duration, 10.0, 3600.0);
+  spec.scenario = static_cast<ScenarioKind>(std::clamp(scenario, 0, static_cast<int>(ScenarioKind::Count) - 1));
+  spec.scenario_at = scenario_at;
+  const double params[kMaxStrategyParams] = {p0, p1, p2, p3, p4};
+  const auto id = static_cast<StrategyId>(std::clamp(strategy, 0, static_cast<int>(StrategyId::Count) - 1));
+  const BacktestResult r = run_backtest(id, params, spec);
+  const BacktestMetrics& k = r.metrics;
+  const size_t n = r.equity.size();
+  g_backtest.assign(kBacktestHeader + 3 * n, 0.0);
+  double* h = g_backtest.data();
+  int i = 0;
+  h[i++] = static_cast<double>(n - 1);
+  h[i++] = k.pnl;
+  h[i++] = k.spread;
+  h[i++] = k.inventory;
+  h[i++] = k.fees;
+  h[i++] = k.sharpe;
+  h[i++] = k.max_drawdown;
+  h[i++] = static_cast<double>(k.volume);
+  h[i++] = k.trades;
+  h[i++] = k.maker_share;
+  h[i++] = static_cast<double>(k.max_position);
+  h[i++] = k.time_in_market;
+  h[i++] = k.markout[0];
+  h[i++] = k.markout[1];
+  h[i++] = k.markout[2];
+  h[i++] = k.market_move;
+  h[i++] = static_cast<double>(spec.seed);
+  std::copy(r.equity.begin(), r.equity.end(), h + kBacktestHeader);
+  std::copy(r.position.begin(), r.position.end(), h + kBacktestHeader + n);
+  std::copy(r.mid.begin(), r.mid.end(), h + kBacktestHeader + 2 * n);
+  return h;
+}
 
 }  // extern "C"

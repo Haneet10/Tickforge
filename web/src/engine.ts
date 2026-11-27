@@ -215,6 +215,10 @@ interface Exports {
   tf_vol_burst(seconds: number, multiple: number): void;
   tf_dials(activity: number, liquidity: number, volatility: number, momentum: number, informed: number): void;
   tf_breaker(enabled: number, band: number): void;
+  tf_catalog(): number;
+  tf_catalog_len(): number;
+  tf_backtest(strategy: number, seed: number, warmup: number, duration: number, scenario: number, scenarioAt: number,
+    p0: number, p1: number, p2: number, p3: number, p4: number): number;
 }
 
 let compiled: Promise<WebAssembly.Module> | null = null;
@@ -236,6 +240,62 @@ const wasiStubs = {
     fd_write: () => 0,
   },
 };
+
+export interface StrategyParam {
+  key: string;
+  label: string;
+  unit: string;
+  def: number;
+  min: number;
+  max: number;
+  step: number;
+  help: string;
+}
+
+export interface StrategyInfo {
+  id: number;
+  key: string;
+  name: string;
+  style: string;
+  blurb: string;
+  params: StrategyParam[];
+}
+
+/** Scenario keys in engine order (tf::ScenarioKind). */
+export const BACKTEST_SCENARIOS = ['none', 'crash', 'news-bad', 'news-good', 'whale', 'fat-finger', 'drought', 'storm'] as const;
+
+export interface BacktestSpec {
+  strategy: number;
+  params: number[];
+  seed: number;
+  warmup: number;
+  duration: number;
+  scenario: number;
+  scenarioAt: number;
+}
+
+export interface BacktestRun {
+  seed: number;
+  seconds: number;
+  pnl: number; // dollars
+  spread: number;
+  inventory: number;
+  fees: number;
+  sharpe: number;
+  maxDrawdown: number;
+  volume: number;
+  trades: number;
+  makerShare: number;
+  maxPosition: number;
+  timeInMarket: number;
+  markout: [number, number, number]; // ticks per share
+  marketMove: number; // dollars per share
+  equity: Float64Array; // dollars, one per second
+  position: Float64Array;
+  mid: Float64Array;
+}
+
+const BACKTEST_HEADER = 24;
 
 export const BAR_FIELDS = 8;
 export const SAMPLE_FIELDS = 8;
@@ -434,5 +494,28 @@ export class Engine {
   }
   breaker(enabled: boolean, band: number): void {
     this.x.tf_breaker(enabled ? 1 : 0, band);
+  }
+
+  // ---------------------------------------------------------- backtests ----
+
+  catalog(): StrategyInfo[] {
+    const ptr = this.x.tf_catalog();
+    const bytes = new Uint8Array(this.x.memory.buffer, ptr, this.x.tf_catalog_len());
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
+
+  /** Runs a whole session in a fresh market; the live market is untouched. */
+  backtest(b: BacktestSpec): BacktestRun {
+    const p = [...b.params, 0, 0, 0, 0, 0];
+    const ptr = this.x.tf_backtest(b.strategy, b.seed, b.warmup, b.duration, b.scenario, b.scenarioAt, p[0], p[1], p[2], p[3], p[4]);
+    const head = this.f64(ptr, BACKTEST_HEADER);
+    const n = head[0] + 1;
+    const series = this.f64(ptr + BACKTEST_HEADER * 8, 3 * n).slice();
+    return {
+      seconds: head[0], pnl: head[1], spread: head[2], inventory: head[3], fees: head[4], sharpe: head[5],
+      maxDrawdown: head[6], volume: head[7], trades: head[8], makerShare: head[9], maxPosition: head[10],
+      timeInMarket: head[11], markout: [head[12], head[13], head[14]], marketMove: head[15], seed: head[16],
+      equity: series.subarray(0, n), position: series.subarray(n, 2 * n), mid: series.subarray(2 * n, 3 * n),
+    };
   }
 }
