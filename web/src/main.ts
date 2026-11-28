@@ -12,6 +12,10 @@ import { Tape } from './ui/tape';
 import { TrendTone } from './ui/motion';
 import { Ticket } from './ui/ticket';
 import { Lab } from './lab/lab';
+import { ReplayBar } from './replay/bar';
+import { decode, LogError, type SessionLog } from './replay/log';
+import { Player } from './replay/player';
+import { openShare } from './replay/share';
 
 async function main(): Promise<void> {
   const params = new URLSearchParams(location.search);
@@ -99,7 +103,58 @@ async function main(): Promise<void> {
   });
   document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.contains(e.target as Node) && e.target !== menuBtn) closeMenu(); });
 
-  $('btn-challenge').addEventListener('click', () => challenge.intro());
+  $('btn-challenge').addEventListener('click', () => (app.driver ? app.driver.refuse() : challenge.intro()));
+
+  // ------------------------------------------------------------ replays ----
+  // A replay takes over the clock; the whole terminal follows it. Leaving puts
+  // back the live session exactly where it was, by re-simulating its log.
+  let player: Player | null = null;
+  const bar = new ReplayBar(app, () => exitReplay());
+  $('app').insertBefore(bar.el, document.querySelector('.statusbar'));
+  const clearHash = () => {
+    if (location.hash.startsWith('#replay=')) history.replaceState(null, '', location.pathname + location.search);
+  };
+  const enterReplay = (log: SessionLog) => {
+    if (app.challengeActive) return app.toast('Finish the challenge first', 'warn');
+    const restore = player ? player.restore : app.currentLog();
+    player = new Player(app, log, restore, {
+      onChange: () => bar.sync(),
+      onEnd: (result) => {
+        if (result && log.watch?.expect !== undefined) {
+          const same = Math.abs(result.pnl - log.watch.expect) < 0.005;
+          app.toast(same ? 'Session over. Same P&L as the lab, to the cent.' : 'Session over, but the P&L differs from the lab. Please report this.', same ? 'up' : 'warn');
+        }
+      },
+    });
+    bar.attach(player);
+    player.start();
+    if (app.paused) app.togglePause();
+    bar.sync();
+  };
+  const exitReplay = () => {
+    if (!player) return;
+    player.exit();
+  };
+  app.on('replay', () => {
+    if (app.driver) return;
+    const tookOver = player?.tookOver ?? false;
+    player = null;
+    bar.attach(null);
+    clearHash();
+    if (tookOver) app.toast('The market is yours from here. Recording carries on.', 'info');
+  });
+  app.on('speed', () => bar.sync());
+  const openFromHash = async () => {
+    if (!location.hash.startsWith('#replay=')) return;
+    try {
+      const log = await decode(location.hash.slice('#replay='.length));
+      enterReplay(log);
+    } catch (err) {
+      clearHash();
+      app.toast(err instanceof LogError ? err.message : 'This replay link could not be opened.', 'warn');
+      if (!(err instanceof LogError)) console.error(err);
+    }
+  };
 
   // Strategy lab: a full-screen view over the terminal, also reachable at #lab.
   const appEl = $('app');
@@ -107,6 +162,9 @@ async function main(): Promise<void> {
   const lab = new Lab(() => {
     appEl.inert = false;
     labBtn.focus({ preventScroll: true });
+  }, (log) => {
+    lab.close();
+    enterReplay(log);
   });
   const openLab = () => {
     if (app.challengeActive) return app.toast('The lab is closed during the challenge', 'warn');
@@ -114,8 +172,17 @@ async function main(): Promise<void> {
     lab.open();
   };
   labBtn.addEventListener('click', openLab);
-  window.addEventListener('hashchange', () => (location.hash === '#lab' ? openLab() : lab.close()));
+  window.addEventListener('hashchange', () => {
+    if (location.hash === '#lab') openLab();
+    else if (location.hash.startsWith('#replay=')) void openFromHash();
+    else lab.close();
+  });
   if (location.hash === '#lab') openLab();
+  $('btn-replay').addEventListener('click', () => {
+    if (player) return app.toast('Exit this replay first, then share your own session.', 'info');
+    if (app.challengeActive) return app.toast('You can replay the challenge when it is over', 'warn');
+    void openShare(app, (log) => enterReplay(log));
+  });
   $('btn-tour').addEventListener('click', () => tour.start());
   $('btn-about').addEventListener('click', () => openAbout(app));
 
@@ -125,6 +192,7 @@ async function main(): Promise<void> {
     const t = e.target as HTMLElement;
     if (t.closest('input, select, textarea, [role="dialog"]') || e.metaKey || e.ctrlKey || e.altKey) return;
     if (document.querySelector('.scrim, .tour-card') || lab.isOpen) return;
+    if (e.key === 'Escape' && player && menu.hidden) { exitReplay(); return; }
     if (e.key === ' ') { e.preventDefault(); pauseBtn.click(); }
     else if (e.key === 'f' || e.key === 'F') app.flatten();
     else if (e.key === 'c' || e.key === 'C') app.cancelAll();
@@ -174,6 +242,7 @@ async function main(): Promise<void> {
     el.halt.hidden = s.haltRemaining <= 0;
     if (s.haltRemaining > 0) setText(el.halt, `Trading halted · resumes in ${Math.ceil(s.haltRemaining)}s`);
 
+    bar.text();
     ladder.update();
     tape.update();
     ticket.refresh();
@@ -187,6 +256,7 @@ async function main(): Promise<void> {
     prev = now;
     app.frame(dt);
     challenge.update();
+    bar.frame();
     chart.draw();
     depth.draw();
     // Numbers and tables refresh five times a second: fast enough to feel live,
@@ -208,7 +278,9 @@ async function main(): Promise<void> {
 
   let toured = false;
   try { toured = localStorage.getItem('tickforge.toured') === '1'; } catch { /* private mode */ }
-  if (!toured && !params.has('notour') && !lab.isOpen && window.innerWidth > 900) setTimeout(() => tour.start(), 900);
+  const replayLink = location.hash.startsWith('#replay=');
+  if (replayLink) void openFromHash();
+  if (!toured && !replayLink && !params.has('notour') && !lab.isOpen && window.innerWidth > 900) setTimeout(() => tour.start(), 900);
 }
 
 main();

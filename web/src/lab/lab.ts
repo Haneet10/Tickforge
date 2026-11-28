@@ -5,6 +5,7 @@
 // strategy runs on the same seeds, so the leaderboard is a paired comparison.
 import { cssVar, fitCanvas, h, setText } from '../dom';
 import { BACKTEST_SCENARIOS, type BacktestRun, type BacktestSpec, type StrategyInfo } from '../engine';
+import type { SessionLog } from '../replay/log';
 import type { LabReply, LabRequest } from './worker';
 
 const SCENARIO_NAMES: Record<(typeof BACKTEST_SCENARIOS)[number], string> = {
@@ -126,6 +127,8 @@ export class Lab {
   private yLo = -50;
   private yHi = 50;
   private onClose: () => void;
+  private onWatch: (log: SessionLog) => void;
+  private watchBtn = h('button.btn.tiny.lab-watch', { type: 'button', disabled: true, title: 'Open the median session in the terminal and watch the strategy trade it, order by order' }, 'Watch median session');
 
   // Elements.
   private rail = h('div.lab-strats', { role: 'radiogroup', 'aria-label': 'Strategy' });
@@ -147,8 +150,9 @@ export class Lab {
   private statEls = new Map<string, { v: HTMLElement; s: HTMLElement }>();
   private sparks: HTMLCanvasElement[] = [];
 
-  constructor(onClose: () => void) {
+  constructor(onClose: () => void, onWatch: (log: SessionLog) => void) {
     this.onClose = onClose;
+    this.onWatch = onWatch;
     this.el = this.build();
     document.body.append(this.el);
   }
@@ -201,6 +205,9 @@ export class Lab {
     const fanWrap = h('div.lab-fan-wrap', this.fan, this.fanTip);
     this.fan.addEventListener('pointermove', (e) => this.hoverFan(e));
     this.fan.addEventListener('pointerleave', () => this.setHover(-1));
+    this.fan.addEventListener('click', () => this.watchSeed(this.hoverSeed));
+    this.dist.addEventListener('click', () => this.watchSeed(this.hoverSeed));
+    this.watchBtn.addEventListener('click', () => this.watchSeed(this.medianSeed()));
     this.dist.addEventListener('pointermove', (e) => this.hoverDist(e));
     this.dist.addEventListener('pointerleave', () => this.setHover(-1));
     window.addEventListener('resize', () => this.opened && this.requestDraw());
@@ -225,7 +232,8 @@ export class Lab {
           this.stats,
           h('section.lab-card.lab-fan-card',
             h('div.lab-card-head', h('h2', 'Equity, every session'), this.fanTitle,
-              h('span.lab-legend', h('i.sw.med'), 'median', h('i.sw.band'), '10–90%', h('i.sw.seed'), 'one session')),
+              h('span.lab-legend', h('i.sw.med'), 'median', h('i.sw.band'), '10–90%', h('i.sw.seed'), 'one session'),
+              this.watchBtn),
             fanWrap),
           h('div.lab-split',
             h('section.lab-card',
@@ -437,6 +445,7 @@ export class Lab {
     const id = this.catalog[this.selected].id;
     const r = this.current(id);
     const s = r && r.runs.length ? summarize(r.runs) : null;
+    this.watchBtn.disabled = !r || !r.runs.length;
     const put = (key: string, v: string, sub: string, cls = '') => {
       const e = this.statEls.get(key)!;
       setText(e.v, v);
@@ -740,7 +749,8 @@ export class Lab {
       this.fanTip.replaceChildren(
         h('b', `Session ${run.seed}`),
         h('span', `at ${m}:${String(sec).padStart(2, '0')}  ${dollars(run.equity[Math.min(s, run.equity.length - 1)])}`),
-        h('span', `finished ${dollars(run.pnl)} · ${usd0.format(run.volume)} sh traded`));
+        h('span', `finished ${dollars(run.pnl)} · ${usd0.format(run.volume)} sh traded`),
+        h('span.lab-tip-cta', 'Click to watch it trade'));
       this.fanTip.hidden = false;
       const wrap = this.fan.getBoundingClientRect();
       const tipW = 236;
@@ -901,6 +911,41 @@ export class Lab {
 
   get isOpen(): boolean {
     return this.opened;
+  }
+
+  // -------------------------------------------------------------- watch ----
+
+  /** The session whose P&L is the median of the current results, or -1. */
+  private medianSeed(): number {
+    const r = this.current(this.catalog[this.selected]?.id ?? -1);
+    if (!r || !r.runs.length) return -1;
+    const sorted = [...r.runs].sort((a, b) => a.pnl - b.pnl);
+    return sorted[Math.floor((sorted.length - 1) / 2)].seed;
+  }
+
+  /** Hands one finished session to the terminal to play back, trade by trade. */
+  private watchSeed(seed: number): void {
+    if (seed < 0) return;
+    const info = this.catalog[this.selected];
+    const r = info && this.current(info.id);
+    const run = r?.runs.find((x) => x.seed === seed);
+    if (!info || !r || !run) return;
+    const duration = r.config.minutes * 60;
+    this.onWatch({
+      seed: run.seed,
+      warmup: WARMUP,
+      length: duration * 1e6,
+      actions: [],
+      watch: {
+        strategy: info.id,
+        params: [...r.params],
+        duration,
+        scenario: r.config.scenario,
+        scenarioAt: SCENARIO_AT,
+        expect: run.pnl,
+        label: `${info.name} · session ${run.seed}`,
+      },
+    });
   }
 }
 

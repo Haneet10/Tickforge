@@ -2,11 +2,13 @@
 // needs into plain arrays once per frame. Panels read from here and never
 // touch WebAssembly memory themselves.
 import {
-  AlgoStyle, Engine, REJECT_REASONS, Side, Status, Tif,
+  Engine, REJECT_REASONS, Side, Status, Tif,
   type BotParams, type Fill, type KindStats, type Level, type MarketState, type OpenOrder, type OrderResult, type Trade,
 } from './engine';
 import { money, px, qty } from './fmt';
 import { History } from './history';
+import { applyToEngine } from './replay/apply';
+import { type Action, emptyLog, type SessionLog } from './replay/log';
 
 export type Tone = 'up' | 'down' | 'warn' | 'info';
 
@@ -21,7 +23,6 @@ export interface Scenario {
   name: string;
   blurb: string;
   tone: Tone;
-  run(app: App): void;
 }
 
 export const WARMUP_SECONDS = 45 * 60;
@@ -33,49 +34,42 @@ export const SCENARIOS: Scenario[] = [
     name: 'Flash crash',
     blurb: 'A fund sells 32,000 shares as a fixed share of volume with no price limit, the mistake behind the May 2010 flash crash. Market makers get run over and pull their quotes.',
     tone: 'down',
-    run: (app) => app.engine.crash(1),
   },
   {
     id: 'news-bad',
     name: 'Bad news',
     blurb: 'The stock is suddenly worth 2% less. Informed traders know first. Watch them hit stale bids until the price catches up.',
     tone: 'down',
-    run: (app) => app.engine.news(-0.02),
   },
   {
     id: 'news-good',
     name: 'Good news',
     blurb: 'The stock is suddenly worth 2% more. Anyone left offering at the old price gets picked off.',
     tone: 'up',
-    run: (app) => app.engine.news(0.02),
   },
   {
     id: 'whale',
     name: 'Whale buyer',
     blurb: 'An institution buys 25,000 shares in even slices over 90 seconds. The price drifts up while it works and partly falls back after.',
     tone: 'up',
-    run: (app) => app.engine.whale(Side.Buy, 25000, 90),
   },
   {
     id: 'fat-finger',
     name: 'Fat finger',
     blurb: 'Someone sends a 15,000 share market sell by mistake. It eats through the book in one message.',
     tone: 'down',
-    run: (app) => app.engine.fatFinger(Side.Sell, 15000),
   },
   {
     id: 'drought',
     name: 'Liquidity drought',
     blurb: 'Most market makers switch off for a minute. Spreads widen and every order moves the price further.',
     tone: 'warn',
-    run: (app) => app.engine.drought(60),
   },
   {
     id: 'storm',
     name: 'Volatility storm',
     blurb: 'Fair value moves three times as fast for two minutes. Quoting gets dangerous.',
     tone: 'warn',
-    run: (app) => app.engine.volBurst(120, 3),
   },
 ];
 
@@ -89,6 +83,17 @@ const SCENARIO_LABELS: Record<number, string> = {
 };
 
 type Listener = (payload?: any) => void;
+
+/** Something that drives the market instead of the clock: the replay player. */
+export interface Driver {
+  /** Advance by this many simulated seconds. */
+  advance(simSeconds: number): void;
+  /** The user tried to change the market. */
+  refuse(): void;
+}
+
+export const DEFAULT_DIALS = { activity: 1, liquidity: 1, volatility: 1, momentum: true, informed: true, breaker: false };
+export const DEFAULT_BOT: BotParams = { gamma: 0.05, kappa: 0.7, horizon: 10, size: 100, maxInventory: 1000 };
 
 export class App {
   engine!: Engine;
@@ -107,8 +112,17 @@ export class App {
   /** When set, UI that could leak hidden information or change the market is locked. */
   challengeActive = false;
 
-  dials = { activity: 1, liquidity: 1, volatility: 1, momentum: true, informed: true, breaker: false };
-  bot: BotParams & { enabled: boolean } = { enabled: false, gamma: 0.05, kappa: 0.7, horizon: 10, size: 100, maxInventory: 1000 };
+  dials = { ...DEFAULT_DIALS };
+  bot: BotParams & { enabled: boolean } = { enabled: false, ...DEFAULT_BOT };
+
+  /** The live session, recorded as it happens (see replay/log.ts). */
+  log: SessionLog = emptyLog(1, WARMUP_SECONDS);
+  /** Simulated microsecond at which the current session began. */
+  sessionStartUs = 0;
+  /** Set while a replay drives the market. User actions are refused. */
+  driver: Driver | null = null;
+  /** Suppresses toasts while a replay fast-forwards. */
+  private quiet = 0;
 
   warmup = { seconds: WARMUP_SECONDS, ms: 0, messages: 0 };
   /** Simulated second at which the user's session (and the visible day) began. */
@@ -127,6 +141,7 @@ export class App {
     this.listeners.get(event)?.forEach((fn) => fn(payload));
   }
   toast(text: string, tone: Tone = 'info'): void {
+    if (this.quiet) return;
     this.emit('toast', { text, tone });
   }
 
@@ -137,6 +152,17 @@ export class App {
 
   /** Throw the market away and start a new one from the given seed. */
   restart(seed: number, warmupSeconds = WARMUP_SECONDS): void {
+    if (this.driver) return this.driver.refuse();
+    this.resetMarket(seed, warmupSeconds);
+    this.bot.enabled = false;
+    this.log = emptyLog(seed, warmupSeconds);
+    this.act(this.dialsAction()); // the session starts with whatever dials are set
+    this.pull();
+    this.emit('restart');
+  }
+
+  /** Fresh market, warmed up, with the user's clock and every mirror reset. Records nothing. */
+  private resetMarket(seed: number, warmupSeconds: number): void {
     this.engine.reset(seed);
     const t0 = performance.now();
     this.engine.step(warmupSeconds);
@@ -151,17 +177,75 @@ export class App {
     this.fillSeen = 0;
     this.s = this.engine.state();
     this.eventSeen = this.s.eventCount;
-    this.warmup = { seconds: warmupSeconds, ms, messages: this.s.messages };
+    if (warmupSeconds >= 600) this.warmup = { seconds: warmupSeconds, ms, messages: this.s.messages };
     this.sessionStart = this.s.time;
-    this.applyDials();
-    this.bot.enabled = false;
-    this.pull();
-    this.emit('restart');
+    this.sessionStartUs = this.engine.now();
+  }
+
+  /** Microseconds since the current session began. */
+  sessionTime(): number {
+    return this.engine.now() - this.sessionStartUs;
+  }
+
+  /** The live recording, closed off at the current instant. */
+  currentLog(): SessionLog {
+    return { ...this.log, actions: [...this.log.actions], length: Math.max(this.log.length, this.sessionTime()) };
+  }
+
+  /**
+   * Rebuilds the market from a log, up to `t` microseconds into the session.
+   * The engine re-simulates everything from the seed, applying each action
+   * on its recorded microsecond, so the result is the original market, not an
+   * approximation. Toasts are muted; chart marks are rebuilt.
+   * Returns the index of the first action after `t`.
+   */
+  simulate(log: SessionLog, t: number): number {
+    this.quiet++;
+    try {
+      this.resetMarket(log.seed, log.warmup);
+      this.dials = { ...DEFAULT_DIALS };
+      this.bot = { enabled: false, ...DEFAULT_BOT };
+      // Panels clear now, then rebuild from the fills and trades that follow.
+      this.emit('restart');
+      if (log.watch) this.engine.watch(log.watch);
+      let i = 0;
+      for (; i < log.actions.length && log.actions[i].t <= t; i++) {
+        this.engine.stepTo(this.sessionStartUs + log.actions[i].t);
+        this.apply(log.actions[i].a);
+      }
+      this.engine.stepTo(this.sessionStartUs + t);
+      this.pull();
+      return i;
+    } finally {
+      this.quiet--;
+      this.emit('dials');
+      this.emit('bot');
+    }
+  }
+
+  /** Applies a recorded action during playback, at the current instant. */
+  playback(a: Action): void {
+    this.apply(a);
+  }
+
+  /** Stops a replay. With a log, the market continues as that live session. */
+  release(continueWith: SessionLog | null): void {
+    this.driver = null;
+    if (continueWith) {
+      this.log = { ...continueWith, actions: [...continueWith.actions] };
+      this.log.length = 0;
+      delete this.log.watch;
+    }
+    this.emit('replay');
   }
 
   /** Advance the market by a slice of real time and refresh the mirrors. */
   frame(realSeconds: number): void {
-    if (!this.paused) this.engine.step(Math.min(realSeconds, 0.1) * this.speed);
+    if (!this.paused) {
+      const sim = Math.min(realSeconds, 0.1) * this.speed;
+      if (this.driver) this.driver.advance(sim);
+      else this.engine.step(sim);
+    }
     this.pull();
   }
 
@@ -247,63 +331,110 @@ export class App {
     return slip > 0.5 ? ` · cost ${money(slip, false)} vs mid` : '';
   }
 
-  limit(side: Side, price: number, quantity: number, tif: Tif = Tif.GTC, postOnly = false): OrderResult {
-    return this.report(side, this.engine.limit(side, price, quantity, tif, postOnly), 'limit');
+  /**
+   * Every change the user makes to the market goes through here: it is
+   * recorded with the microsecond it happened, then applied. During a replay
+   * it is refused instead.
+   */
+  private act(a: Action): OrderResult | null {
+    if (this.driver) {
+      this.driver.refuse();
+      return null;
+    }
+    this.log.actions.push({ t: this.sessionTime(), a });
+    return this.apply(a);
   }
-  market(side: Side, quantity: number): OrderResult {
-    return this.report(side, this.engine.market(side, quantity), 'market');
+
+  /** Applies an action to the engine and keeps the UI's mirrors in step. */
+  private apply(a: Action): OrderResult | null {
+    const ordersBefore = this.orders.length;
+    const posBefore = this.s.position;
+    const r = applyToEngine(this.engine, a);
+    switch (a[0]) {
+      case 'L': return this.report(a[1] as Side, r!, 'limit');
+      case 'M': return this.report(a[1] as Side, r!, 'market');
+      case 'T':
+        this.toast(`TWAP started: ${a[1] === Side.Buy ? 'buy' : 'sell'} ${qty(a[2])} over ${a[3]}s`, 'info');
+        break;
+      case 'XA':
+        if (ordersBefore) this.toast(`Cancelled ${ordersBefore} order${ordersBefore === 1 ? '' : 's'}`, 'info');
+        break;
+      case 'F':
+        if (r && r.filled > 0) this.toast(`Flattened: ${posBefore > 0 ? 'sold' : 'bought'} ${qty(r.filled)} @ ${px(r.avgPrice)}`, 'info');
+        break;
+      case 'R':
+        this.fills = [];
+        this.emit('account-reset');
+        break;
+      case 'B':
+        this.bot = { enabled: a[1] !== 0, gamma: a[2], kappa: a[3], horizon: a[4], size: a[5], maxInventory: a[6] };
+        this.emit('bot');
+        break;
+      case 'D':
+        this.dials = { activity: a[1], liquidity: a[2], volatility: a[3], momentum: a[4] !== 0, informed: a[5] !== 0, breaker: a[6] !== 0 };
+        this.emit('dials');
+        break;
+      case 'S': {
+        const sc = SCENARIOS[a[1]];
+        if (sc) this.toast(`${sc.name} triggered`, sc.tone);
+        break;
+      }
+    }
+    this.pull();
+    return r;
+  }
+
+  limit(side: Side, price: number, quantity: number, tif: Tif = Tif.GTC, postOnly = false): OrderResult | null {
+    return this.act(['L', side, Math.round(price), Math.round(quantity), tif, postOnly ? 1 : 0]);
+  }
+  market(side: Side, quantity: number): OrderResult | null {
+    return this.act(['M', side, Math.round(quantity)]);
   }
   twap(side: Side, quantity: number, seconds: number): void {
-    this.engine.algo(side, quantity, AlgoStyle.Twap, seconds);
-    this.toast(`TWAP started: ${side === Side.Buy ? 'buy' : 'sell'} ${qty(quantity)} over ${seconds}s`, 'info');
-    this.pull();
+    this.act(['T', side, Math.round(quantity), seconds]);
+  }
+  stopAlgo(): void {
+    this.act(['AX']);
   }
   cancel(id: number): void {
-    this.engine.cancel(id);
-    this.pull();
+    this.act(['X', id]);
   }
   cancelAll(): void {
-    const n = this.engine.cancelAll();
-    if (n) this.toast(`Cancelled ${n} order${n === 1 ? '' : 's'}`, 'info');
-    this.pull();
+    this.act(['XA']);
   }
   flatten(): void {
-    const pos = this.s.position;
-    if (pos === 0 && this.orders.length === 0) return;
-    const r = this.engine.flatten();
-    if (r.filled > 0) this.toast(`Flattened: ${pos > 0 ? 'sold' : 'bought'} ${qty(r.filled)} @ ${px(r.avgPrice)}`, 'info');
-    this.pull();
+    if (this.s.position === 0 && this.orders.length === 0) return;
+    this.act(['F']);
+  }
+  /** Moves the hidden true value: the challenge's surprise news. */
+  news(fraction: number): void {
+    this.act(['N', fraction]);
   }
   resetAccount(): void {
-    this.setBot(false);
-    this.engine.userReset();
-    this.fills = [];
-    this.pull();
-    this.emit('account-reset');
+    if (this.bot.enabled) this.setBot(false);
+    this.act(['R']);
   }
 
   setBot(enabled: boolean): void {
-    this.bot.enabled = enabled;
-    this.engine.bot(enabled, this.bot);
-    this.pull();
-    this.emit('bot');
+    const b = this.bot;
+    this.act(['B', enabled ? 1 : 0, b.gamma, b.kappa, b.horizon, b.size, b.maxInventory]);
   }
   updateBot(): void {
-    if (this.bot.enabled) this.engine.bot(true, this.bot);
+    if (this.bot.enabled) this.setBot(true);
   }
 
-  applyDials(): void {
+  private dialsAction(): Action {
     const d = this.dials;
-    this.engine.dials(d.activity, d.liquidity, d.volatility, d.momentum, d.informed);
-    this.engine.breaker(d.breaker, 0.035);
+    return ['D', d.activity, d.liquidity, d.volatility, d.momentum ? 1 : 0, d.informed ? 1 : 0, d.breaker ? 1 : 0];
+  }
+  applyDials(): void {
+    this.act(this.dialsAction());
   }
 
   runScenario(id: string): void {
-    const sc = SCENARIOS.find((x) => x.id === id);
-    if (!sc || this.challengeActive) return;
-    sc.run(this);
-    this.toast(`${sc.name} triggered`, sc.tone);
-    this.pull();
+    const i = SCENARIOS.findIndex((x) => x.id === id);
+    if (i < 0 || this.challengeActive) return;
+    this.act(['S', i]);
   }
 
   setSpeed(speed: number): void {

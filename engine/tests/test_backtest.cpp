@@ -219,3 +219,122 @@ TEST("backtest: the trend follower profits from a crash, the fader is run over")
   CHECK(mom > 0);
   CHECK(rev < 0);
 }
+
+// ------------------------------------------------------------- replays ----
+//
+// The terminal records a session as a seed plus timestamped actions and plays
+// it back by stepping to each timestamp. That only works if the result never
+// depends on how time is sliced, so these tests slice it badly on purpose.
+
+namespace {
+
+/// Small deterministic generator for slice lengths, independent of the market's.
+struct Slicer {
+  uint64_t x;
+  Time next(Time max) {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    return 1 + static_cast<Time>(x % static_cast<uint64_t>(max));
+  }
+};
+
+}  // namespace
+
+TEST("replay: a session driven in ragged slices matches the one-call backtest") {
+  for (int i = 0; i < static_cast<int>(StrategyId::Count); ++i) {
+    const auto id = static_cast<StrategyId>(i);
+    BacktestSpec spec = short_spec(31, 90);
+    spec.scenario = ScenarioKind::FlashCrash;
+    spec.scenario_at = 0.4;
+    const BacktestResult ref = run_backtest(id, nullptr, spec);
+
+    Config cfg;
+    cfg.seed = spec.seed;
+    Market m(cfg);
+    m.step(static_cast<Time>(spec.warmup * kSecond));
+    m.user_reset();
+    auto strategy = make_strategy(id);
+    BacktestSession session(m, *strategy, spec);
+    CHECK_EQ(session.fire_at(), 36);
+    Slicer slicer{0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(i)};
+    // Frame-sized slices from 1 µs to 70 ms, like a browser at any frame rate.
+    while (!session.advance_to(m.now() + slicer.next(70 * kMillisecond))) {
+    }
+    CHECK_EQ(m.now(), session.end_time());
+    const BacktestResult got = session.finish();
+    CHECK_EQ(got.equity, ref.equity);
+    CHECK_EQ(got.position, ref.position);
+    CHECK_EQ(got.mid, ref.mid);
+    CHECK_EQ(got.metrics.pnl, ref.metrics.pnl);
+    CHECK_EQ(got.metrics.max_position, ref.metrics.max_position);
+    CHECK_EQ(got.metrics.trades, ref.metrics.trades);
+    // finish() is idempotent: the terminal may ask for the result again.
+    CHECK_EQ(session.finish().metrics.pnl, ref.metrics.pnl);
+  }
+}
+
+TEST("replay: user actions at recorded times reproduce the market exactly") {
+  // A "live" run: the market advances in uneven frames and the user acts
+  // between frames. Every action is logged with the microsecond it happened.
+  struct Action {
+    Time at;
+    int kind;  // 0 limit buy, 1 market sell, 2 cancel newest, 3 crash
+  };
+  std::vector<Action> log;
+  auto act = [](Market& m, int kind, std::vector<OrderId>& ids) {
+    switch (kind) {
+      case 0: {
+        const Result r = m.user_limit(Side::Buy, m.book().best_bid(), 200, TimeInForce::GTC, false);
+        if (r.id) ids.push_back(r.id);
+        break;
+      }
+      case 1: m.user_market(Side::Sell, 100); break;
+      case 2:
+        if (!ids.empty()) {
+          m.user_cancel(ids.back());
+          ids.pop_back();
+        }
+        break;
+      case 3: m.flash_crash(0.5); break;
+    }
+  };
+
+  Config cfg;
+  cfg.seed = 77;
+  Market live(cfg);
+  live.step(300 * kSecond);
+  live.user_reset();
+  const Time t0 = live.now();
+  Slicer frames{12345};
+  std::vector<OrderId> ids;
+  for (int k = 0; k < 60; ++k) {
+    live.step(frames.next(900 * kMillisecond));
+    const int kind = k == 30 ? 3 : static_cast<int>(frames.next(3)) - 1;
+    log.push_back({live.now() - t0, kind});
+    act(live, kind, ids);
+  }
+  live.step(5 * kSecond);
+  const Time t_end = live.now() - t0;
+
+  // The replay jumps straight from one action to the next.
+  Market replay(cfg);
+  replay.step(300 * kSecond);
+  replay.user_reset();
+  std::vector<OrderId> ids2;
+  for (const Action& a : log) {
+    replay.step(t0 + a.at - replay.now());
+    act(replay, a.kind, ids2);
+  }
+  replay.step(t0 + t_end - replay.now());
+
+  CHECK_EQ(replay.now(), live.now());
+  CHECK_EQ(ids2, ids);
+  CHECK_EQ(replay.tape_count(), live.tape_count());
+  CHECK_EQ(replay.user_fill_count(), live.user_fill_count());
+  CHECK_EQ(replay.account(0).position, live.account(0).position);
+  CHECK_EQ(replay.user_pnl().total, live.user_pnl().total);
+  CHECK_EQ(replay.mid(), live.mid());
+  CHECK_EQ(replay.book().best_bid(), live.book().best_bid());
+  CHECK_EQ(replay.book().best_ask(), live.book().best_ask());
+}

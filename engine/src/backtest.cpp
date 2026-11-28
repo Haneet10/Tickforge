@@ -398,73 +398,107 @@ double percentile(std::vector<double> xs, double q) {
 
 // -------------------------------------------------------------- runner ----
 
+BacktestSession::BacktestSession(Market& m, Strategy& strategy, const BacktestSpec& spec)
+    : m_(m), strategy_(strategy) {
+  r_.spec = spec;
+  seconds_ = std::max(1, static_cast<int>(std::lround(spec.duration)));
+  fire_at_ = spec.scenario == ScenarioKind::None
+                 ? -1
+                 : std::clamp(static_cast<int>(std::lround(spec.scenario_at * seconds_)), 0, seconds_ - 1);
+  r_.equity.reserve(seconds_ + 1);
+  r_.position.reserve(seconds_ + 1);
+  r_.mid.reserve(seconds_ + 1);
+  start_ = m_.now();
+  strategy_.start(m_);
+  sample();
+  step_ = std::clamp<Time>(strategy_.interval(), kMillisecond, kSecond);
+  next_tick_ = start_;
+  second_end_ = start_ + kSecond;
+}
+
+void BacktestSession::sample() {
+  r_.equity.push_back(m_.user_pnl().total / 100.0);
+  r_.position.push_back(static_cast<double>(m_.account(0).position));
+  r_.mid.push_back(m_.mid() / 100.0);
+}
+
+bool BacktestSession::advance_to(Time t) {
+  // Everything due at the current instant happens in a fixed order (close
+  // the second, fire the scenario, let the strategy act), then the market
+  // runs to the next instant anything is due. Stopping short of that instant
+  // just runs the market part of the way; resuming picks up where it left
+  // off, which is why slicing never changes the result.
+  while (!done_) {
+    if (m_.now() == second_end_) {
+      if (m_.account(0).position != 0) ++in_market_;
+      sample();
+      if (++second_ == seconds_) {
+        done_ = true;
+        break;
+      }
+      second_end_ += kSecond;
+      scenario_due_ = true;
+    }
+    if (scenario_due_) {
+      scenario_due_ = false;
+      if (second_ == fire_at_) fire_scenario(m_, r_.spec.scenario);
+    }
+    if (m_.now() >= next_tick_) {
+      strategy_.tick(m_);
+      next_tick_ += step_;
+    }
+    const Time target = std::min(next_tick_, second_end_);
+    if (target > t) {
+      if (t > m_.now()) m_.step(t - m_.now());
+      break;
+    }
+    m_.step(target - m_.now());
+    // Sampled only at decision points, as a whole-session run would.
+    max_pos_ = std::max<int64_t>(max_pos_, std::abs(m_.account(0).position));
+  }
+  return done_;
+}
+
+BacktestResult BacktestSession::finish() {
+  if (finished_) return r_;
+  finished_ = true;
+  strategy_.stop(m_);
+  m_.user_cancel_all();
+  if (r_.spec.flatten && m_.account(0).position != 0) {
+    m_.user_flatten();
+    r_.equity.back() = m_.user_pnl().total / 100.0;
+    r_.position.back() = static_cast<double>(m_.account(0).position);
+  }
+
+  const PnlBreakdown& p = m_.user_pnl();
+  const Account& a = m_.account(0);
+  BacktestMetrics& k = r_.metrics;
+  k.pnl = p.total / 100.0;
+  k.spread = p.spread / 100.0;
+  k.inventory = p.inventory / 100.0;
+  k.fees = p.fees / 100.0;
+  k.sharpe = sharpe_ratio(r_.equity);
+  k.max_drawdown = max_drawdown(r_.equity);
+  k.volume = a.volume;
+  k.trades = a.trades;
+  k.maker_share = a.volume ? static_cast<double>(a.maker_volume) / static_cast<double>(a.volume) : 0;
+  k.max_position = max_pos_;
+  k.time_in_market = static_cast<double>(in_market_) / seconds_;
+  for (int i = 0; i < 3; ++i)
+    k.markout[i] = p.markout_qty[i] ? p.markout_sum[i] / static_cast<double>(p.markout_qty[i]) : 0;
+  k.market_move = r_.mid.back() - r_.mid.front();
+  return r_;
+}
+
 BacktestResult run_backtest(Strategy& strategy, const BacktestSpec& spec, const Config& base) {
   Config cfg = base;
   cfg.seed = spec.seed;
   Market m(cfg);
   m.step(static_cast<Time>(std::max(0.0, spec.warmup) * kSecond));
   m.user_reset();
-
-  BacktestResult r;
-  r.spec = spec;
-  const int seconds = std::max(1, static_cast<int>(std::lround(spec.duration)));
-  const int fire_at = spec.scenario == ScenarioKind::None
-                          ? -1
-                          : std::clamp(static_cast<int>(std::lround(spec.scenario_at * seconds)), 0, seconds - 1);
-  r.equity.reserve(seconds + 1);
-  r.position.reserve(seconds + 1);
-  r.mid.reserve(seconds + 1);
-  auto sample = [&] {
-    r.equity.push_back(m.user_pnl().total / 100.0);
-    r.position.push_back(static_cast<double>(m.account(0).position));
-    r.mid.push_back(m.mid() / 100.0);
-  };
-
-  strategy.start(m);
-  sample();
-  const Time step = std::clamp<Time>(strategy.interval(), kMillisecond, kSecond);
-  int64_t in_market = 0, max_pos = 0;
-  Time next_tick = m.now();
-  for (int s = 0; s < seconds; ++s) {
-    if (s == fire_at) fire_scenario(m, spec.scenario);
-    const Time end = m.now() + kSecond;
-    while (m.now() < end) {
-      if (m.now() >= next_tick) {
-        strategy.tick(m);
-        next_tick += step;
-      }
-      m.step(std::min(next_tick, end) - m.now());
-      max_pos = std::max<int64_t>(max_pos, std::abs(m.account(0).position));
-    }
-    if (m.account(0).position != 0) ++in_market;
-    sample();
-  }
-  strategy.stop(m);
-  m.user_cancel_all();
-  if (spec.flatten && m.account(0).position != 0) {
-    m.user_flatten();
-    r.equity.back() = m.user_pnl().total / 100.0;
-    r.position.back() = static_cast<double>(m.account(0).position);
-  }
-
-  const PnlBreakdown& p = m.user_pnl();
-  const Account& a = m.account(0);
-  BacktestMetrics& k = r.metrics;
-  k.pnl = p.total / 100.0;
-  k.spread = p.spread / 100.0;
-  k.inventory = p.inventory / 100.0;
-  k.fees = p.fees / 100.0;
-  k.sharpe = sharpe_ratio(r.equity);
-  k.max_drawdown = max_drawdown(r.equity);
-  k.volume = a.volume;
-  k.trades = a.trades;
-  k.maker_share = a.volume ? static_cast<double>(a.maker_volume) / static_cast<double>(a.volume) : 0;
-  k.max_position = max_pos;
-  k.time_in_market = static_cast<double>(in_market) / seconds;
-  for (int i = 0; i < 3; ++i)
-    k.markout[i] = p.markout_qty[i] ? p.markout_sum[i] / static_cast<double>(p.markout_qty[i]) : 0;
-  k.market_move = r.mid.back() - r.mid.front();
-  return r;
+  BacktestSession session(m, strategy, spec);
+  session.advance_to(session.end_time());
+  return session.finish();
 }
 
 BacktestResult run_backtest(StrategyId id, const double* params, const BacktestSpec& spec,

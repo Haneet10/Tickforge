@@ -23,6 +23,27 @@ namespace {
 
 std::unique_ptr<Market> g_market;
 
+// A lab session being watched in the terminal (see tf_watch).
+struct Watch {
+  std::unique_ptr<Strategy> strategy;
+  std::unique_ptr<BacktestSession> session;
+  bool finished = false;
+};
+std::unique_ptr<Watch> g_watch;
+
+/// Runs the live market to absolute time `to`, letting a watched strategy
+/// session drive it while one is running.
+void run_to(Time to) {
+  if (to <= g_market->now()) return;
+  if (g_watch && !g_watch->finished) {
+    if (g_watch->session->advance_to(to)) {
+      g_watch->session->finish();
+      g_watch->finished = true;
+    }
+  }
+  if (to > g_market->now()) g_market->step(to - g_market->now());
+}
+
 constexpr int kMaxDepth = 256;
 constexpr int kMaxUserOrders = 128;
 
@@ -54,12 +75,20 @@ extern "C" {
 void TF_EXPORT(tf_create)(double seed) {
   Config cfg;
   cfg.seed = static_cast<uint64_t>(seed);
+  g_watch.reset();
   g_market = std::make_unique<Market>(cfg);
 }
 
 void TF_EXPORT(tf_step)(double seconds) {
-  g_market->step(static_cast<Time>(seconds * 1e6));
+  run_to(g_market->now() + static_cast<Time>(seconds * 1e6));
 }
+
+/// Simulated time in whole microseconds. Exact as a double for 285 years.
+double TF_EXPORT(tf_now)() { return static_cast<double>(g_market->now()); }
+
+/// Runs the market to an exact simulated time in microseconds. Replays use
+/// this so recorded actions land on the very microsecond they were taken.
+void TF_EXPORT(tf_step_to)(double micros) { run_to(static_cast<Time>(micros)); }
 
 // ------------------------------------------------------------- queries ----
 
@@ -315,17 +344,14 @@ int TF_EXPORT(tf_catalog_len)() {
 /// session length in seconds. Header: n, pnl, spread, inventory, fees, sharpe,
 /// max drawdown, volume, trades, maker share, max position, time in market,
 /// markout 1s, 5s, 30s, market move, seed.
-double* TF_EXPORT(tf_backtest)(int strategy, double seed, double warmup, double duration, int scenario,
-                               double scenario_at, double p0, double p1, double p2, double p3, double p4) {
-  BacktestSpec spec;
-  spec.seed = static_cast<uint64_t>(std::max(1.0, seed));
-  spec.warmup = std::clamp(warmup, 0.0, 3600.0);
-  spec.duration = std::clamp(duration, 10.0, 3600.0);
-  spec.scenario = static_cast<ScenarioKind>(std::clamp(scenario, 0, static_cast<int>(ScenarioKind::Count) - 1));
-  spec.scenario_at = scenario_at;
-  const double params[kMaxStrategyParams] = {p0, p1, p2, p3, p4};
-  const auto id = static_cast<StrategyId>(std::clamp(strategy, 0, static_cast<int>(StrategyId::Count) - 1));
-  const BacktestResult r = run_backtest(id, params, spec);
+namespace {
+
+/// Header of kBacktestHeader doubles followed by three series of n+1 samples
+/// each (equity $, position, mid $), where n is the session length in seconds.
+/// Header: n, pnl, spread, inventory, fees, sharpe, max drawdown, volume,
+/// trades, maker share, max position, time in market, markout 1s, 5s, 30s,
+/// market move, seed.
+double* write_backtest(const BacktestResult& r) {
   const BacktestMetrics& k = r.metrics;
   const size_t n = r.equity.size();
   g_backtest.assign(kBacktestHeader + 3 * n, 0.0);
@@ -347,11 +373,76 @@ double* TF_EXPORT(tf_backtest)(int strategy, double seed, double warmup, double 
   h[i++] = k.markout[1];
   h[i++] = k.markout[2];
   h[i++] = k.market_move;
-  h[i++] = static_cast<double>(spec.seed);
+  h[i++] = static_cast<double>(r.spec.seed);
   std::copy(r.equity.begin(), r.equity.end(), h + kBacktestHeader);
   std::copy(r.position.begin(), r.position.end(), h + kBacktestHeader + n);
   std::copy(r.mid.begin(), r.mid.end(), h + kBacktestHeader + 2 * n);
   return h;
+}
+
+BacktestSpec make_spec(double seed, double warmup, double duration, int scenario, double scenario_at) {
+  BacktestSpec spec;
+  spec.seed = static_cast<uint64_t>(std::max(1.0, seed));
+  spec.warmup = std::clamp(warmup, 0.0, 3600.0);
+  spec.duration = std::clamp(duration, 10.0, 3600.0);
+  spec.scenario = static_cast<ScenarioKind>(std::clamp(scenario, 0, static_cast<int>(ScenarioKind::Count) - 1));
+  spec.scenario_at = scenario_at;
+  return spec;
+}
+
+StrategyId strategy_id(int strategy) {
+  return static_cast<StrategyId>(std::clamp(strategy, 0, static_cast<int>(StrategyId::Count) - 1));
+}
+
+double g_watch_state[8];
+
+}  // namespace
+
+/// Run one backtest in its own market. Returns the layout of write_backtest().
+double* TF_EXPORT(tf_backtest)(int strategy, double seed, double warmup, double duration, int scenario,
+                               double scenario_at, double p0, double p1, double p2, double p3, double p4) {
+  const BacktestSpec spec = make_spec(seed, warmup, duration, scenario, scenario_at);
+  const double params[kMaxStrategyParams] = {p0, p1, p2, p3, p4};
+  return write_backtest(run_backtest(strategy_id(strategy), params, spec));
+}
+
+/// Hands the live market's user account to a strategy, as the lab would.
+/// Call right after tf_create(seed), tf_step(warmup) and tf_user_reset(): the
+/// terminal then plays back exactly the session tf_backtest() scored for the
+/// same seed, warm-up and parameters, however the frames slice time.
+void TF_EXPORT(tf_watch)(int strategy, double duration, int scenario, double scenario_at, double p0, double p1,
+                         double p2, double p3, double p4) {
+  const double params[kMaxStrategyParams] = {p0, p1, p2, p3, p4};
+  auto w = std::make_unique<Watch>();
+  BacktestSpec spec = make_spec(1, 0, duration, scenario, scenario_at);
+  spec.seed = g_market->config().seed;
+  w->strategy = make_strategy(strategy_id(strategy), params);
+  w->session = std::make_unique<BacktestSession>(*g_market, *w->strategy, spec);
+  g_watch = std::move(w);
+}
+
+/// Watch progress: active (0/1), finished (0/1), seconds done, session
+/// seconds, scenario second (-1 for none), start time and end time (µs).
+double* TF_EXPORT(tf_watch_state)() {
+  double* o = g_watch_state;
+  std::fill(o, o + 8, 0.0);
+  if (!g_watch) return o;
+  const BacktestSession& s = *g_watch->session;
+  o[0] = 1;
+  o[1] = g_watch->finished ? 1 : 0;
+  o[2] = s.second();
+  o[3] = s.seconds();
+  o[4] = s.fire_at();
+  o[5] = static_cast<double>(s.start_time());
+  o[6] = static_cast<double>(s.end_time());
+  return o;
+}
+
+/// The finished watch session's result, in the tf_backtest() layout, or
+/// nullptr while it is still running.
+double* TF_EXPORT(tf_watch_result)() {
+  if (!g_watch || !g_watch->finished) return nullptr;
+  return write_backtest(g_watch->session->finish());
 }
 
 }  // extern "C"

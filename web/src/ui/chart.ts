@@ -318,6 +318,20 @@ export class Chart {
     // Scenario and halt markers.
     ctx.font = `600 9.5px ${cssSans}`;
     ctx.textAlign = 'left';
+    // A short warm-up (a lab session) can leave the market's first second on
+    // screen. Say so, so the empty space reads as "before the open".
+    if (leftIdx < 0) {
+      const x = Math.round(xOf(-0.5)) + 0.5;
+      ctx.strokeStyle = C.line;
+      ctx.beginPath();
+      ctx.moveTo(x, 16);
+      ctx.lineTo(x, plotH);
+      ctx.stroke();
+      ctx.fillStyle = C.faint;
+      ctx.textAlign = 'right';
+      ctx.fillText(spaced('MARKET OPENS'), x - 6, 9);
+      ctx.textAlign = 'left';
+    }
     for (const m of app.marks) {
       const idx = Math.floor(m.time / this.tf);
       if (idx < leftIdx || idx > rightIdx) continue;

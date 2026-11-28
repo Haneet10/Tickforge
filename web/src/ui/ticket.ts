@@ -33,7 +33,7 @@ export class Ticket {
   private algoNote = h('div.dim');
   private algoBox = h('div.algo-status', { hidden: true },
     h('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, this.algoTitle,
-      h('button.btn.tiny.danger', { type: 'button', onclick: () => this.app.engine.algoCancel() }, 'Stop')),
+      h('button.btn.tiny.danger', { type: 'button', onclick: () => this.app.stopAlgo() }, 'Stop')),
     h('div.progress', this.algoBar), this.algoNote);
   private lastEstimate = '';
 

@@ -183,6 +183,12 @@ interface Exports {
   _initialize(): void;
   tf_create(seed: number): void;
   tf_step(seconds: number): void;
+  tf_now(): number;
+  tf_step_to(micros: number): void;
+  tf_watch(strategy: number, duration: number, scenario: number, scenarioAt: number,
+    p0: number, p1: number, p2: number, p3: number, p4: number): void;
+  tf_watch_state(): number;
+  tf_watch_result(): number;
   tf_state(): number;
   tf_depth_ptr(): number;
   tf_depth(side: number, max: number): number;
@@ -297,6 +303,17 @@ export interface BacktestRun {
 
 const BACKTEST_HEADER = 24;
 
+/** Progress of a lab session being watched in the terminal. */
+export interface WatchState {
+  active: boolean;
+  finished: boolean;
+  second: number;
+  seconds: number;
+  fireAt: number; // session second the scenario fires, -1 for none
+  start: number; // µs
+  end: number; // µs
+}
+
 export const BAR_FIELDS = 8;
 export const SAMPLE_FIELDS = 8;
 
@@ -326,6 +343,16 @@ export class Engine {
 
   step(seconds: number): void {
     this.x.tf_step(seconds);
+  }
+
+  /** Simulated time in whole microseconds. */
+  now(): number {
+    return this.x.tf_now();
+  }
+
+  /** Runs to an exact simulated time in microseconds (no-op if already past it). */
+  stepTo(micros: number): void {
+    this.x.tf_step_to(Math.round(micros));
   }
 
   // Views are created per call: linear memory can grow, which detaches old buffers.
@@ -507,7 +534,32 @@ export class Engine {
   /** Runs a whole session in a fresh market; the live market is untouched. */
   backtest(b: BacktestSpec): BacktestRun {
     const p = [...b.params, 0, 0, 0, 0, 0];
-    const ptr = this.x.tf_backtest(b.strategy, b.seed, b.warmup, b.duration, b.scenario, b.scenarioAt, p[0], p[1], p[2], p[3], p[4]);
+    return this.readBacktest(this.x.tf_backtest(b.strategy, b.seed, b.warmup, b.duration, b.scenario, b.scenarioAt, p[0], p[1], p[2], p[3], p[4]));
+  }
+
+  /**
+   * Hands this market's user account to a strategy, exactly as the lab's
+   * backtest would. Call straight after reset(seed), step(warmup) and
+   * userReset() with the lab's warm-up, and the session that plays out is the
+   * one the lab scored, whatever the frame rate.
+   */
+  watch(spec: Omit<BacktestSpec, 'seed' | 'warmup'>): void {
+    const p = [...spec.params, 0, 0, 0, 0, 0];
+    this.x.tf_watch(spec.strategy, spec.duration, spec.scenario, spec.scenarioAt, p[0], p[1], p[2], p[3], p[4]);
+  }
+
+  watchState(): WatchState {
+    const s = this.f64(this.x.tf_watch_state(), 7);
+    return { active: s[0] !== 0, finished: s[1] !== 0, second: s[2], seconds: s[3], fireAt: s[4], start: s[5], end: s[6] };
+  }
+
+  /** The watched session's result once it has finished, else null. */
+  watchResult(): BacktestRun | null {
+    const ptr = this.x.tf_watch_result();
+    return ptr ? this.readBacktest(ptr) : null;
+  }
+
+  private readBacktest(ptr: number): BacktestRun {
     const head = this.f64(ptr, BACKTEST_HEADER);
     const n = head[0] + 1;
     const series = this.f64(ptr + BACKTEST_HEADER * 8, 3 * n).slice();

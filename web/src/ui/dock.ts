@@ -267,6 +267,7 @@ export class Dock {
     const toggle = h('input', { type: 'checkbox' });
     toggle.addEventListener('change', () => {
       if (app.challengeActive) { toggle.checked = false; app.toast('The bot is locked during the challenge. This one is on you.', 'warn'); return; }
+      if (app.driver) { toggle.checked = app.bot.enabled; app.driver.refuse(); return; }
       app.setBot(toggle.checked);
     });
 
@@ -277,7 +278,9 @@ export class Dock {
       const input = h('input', { type: 'range', min: '0', max: '1000', step: '1', 'aria-label': label });
       input.value = String(toPos(get()));
       val.textContent = fmt(get());
+      app.on('bot', () => { if (document.activeElement !== input) input.value = String(toPos(get())); val.textContent = fmt(get()); });
       input.addEventListener('input', () => {
+        if (app.driver) { input.value = String(toPos(get())); app.driver.refuse(); return; }
         let v = fromPos(Number(input.value));
         v = log ? Number(v.toPrecision(2)) : Math.round(v / step) * step;
         set(v);
@@ -498,7 +501,7 @@ export class Dock {
       const val = h('span.val', `${app.dials[key].toFixed(1)}×`);
       const input = h('input', { type: 'range', min: '0.2', max: '3', step: '0.1', value: String(app.dials[key]), 'aria-label': label });
       input.addEventListener('input', () => {
-        if (app.challengeActive) { input.value = String(app.dials[key]); return; }
+        if (app.challengeActive || app.driver) { input.value = String(app.dials[key]); app.driver?.refuse(); return; }
         app.dials[key] = Number(input.value);
         val.textContent = `${app.dials[key].toFixed(1)}×`;
         app.applyDials();
@@ -510,7 +513,7 @@ export class Dock {
       const input = h('input', { type: 'checkbox' });
       input.checked = app.dials[key];
       input.addEventListener('change', () => {
-        if (app.challengeActive) { input.checked = app.dials[key]; return; }
+        if (app.challengeActive || app.driver) { input.checked = app.dials[key]; app.driver?.refuse(); return; }
         app.dials[key] = input.checked;
         app.applyDials();
       });
@@ -532,6 +535,7 @@ export class Dock {
           h('div.input', { title: 'The same seed always produces the same market.' }, seedIn, h('span.unit', 'SEED')),
           h('button.btn.tiny', { type: 'button', style: 'height:30px', onclick: () => {
             if (app.challengeActive) return;
+            if (app.driver) return app.driver.refuse();
             const seed = clamp(Math.floor(Number(seedIn.value)) || Math.floor(Math.random() * 99999) + 1, 1, 2 ** 31);
             app.restart(seed);
             app.toast(`New market from seed ${seed}`, 'info');
@@ -541,7 +545,7 @@ export class Dock {
       el,
       update: () => {
         if (document.activeElement !== seedIn && seedIn.value === '') seedIn.placeholder = String(app.engine.seed);
-        for (const b of scenBtns) b.disabled = app.challengeActive;
+        for (const b of scenBtns) b.disabled = app.challengeActive || !!app.driver;
       },
     };
   }

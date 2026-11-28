@@ -151,6 +151,55 @@ struct BacktestResult {
   BacktestMetrics metrics;
 };
 
+/// One strategy session that can be advanced a slice at a time.
+///
+/// run_backtest() is a BacktestSession driven to the end in one call. The
+/// terminal drives the very same object a frame at a time to let you watch a
+/// lab session trade, so what you see is bit-for-bit the run the lab scored:
+/// the result depends only on the seed, the warm-up and the spec, never on how
+/// the caller slices time.
+///
+/// The market must already be warmed up and its user account reset.
+class BacktestSession {
+ public:
+  BacktestSession(Market& m, Strategy& strategy, const BacktestSpec& spec);
+
+  /// Runs the session up to simulated time `t` (absolute, microseconds), or
+  /// to its end, whichever comes first. Returns true once the session is over.
+  bool advance_to(Time t);
+  bool done() const { return done_; }
+  /// Seconds completed so far, out of seconds().
+  int second() const { return second_; }
+  int seconds() const { return seconds_; }
+  /// The session second at which the scenario fires, or -1 for none.
+  int fire_at() const { return fire_at_; }
+  Time start_time() const { return start_; }
+  Time end_time() const { return start_ + static_cast<Time>(seconds_) * kSecond; }
+
+  /// Stops the strategy, cancels its orders, flattens if the spec says so and
+  /// computes the metrics. Call once, after done().
+  BacktestResult finish();
+
+ private:
+  void sample();
+
+  Market& m_;
+  Strategy& strategy_;
+  BacktestResult r_;
+  int seconds_ = 0;
+  int fire_at_ = -1;
+  int second_ = 0;
+  bool scenario_due_ = true;  // the start of a second has not been handled yet
+  bool done_ = false;
+  bool finished_ = false;
+  Time start_ = 0;
+  Time step_ = 0;
+  Time next_tick_ = 0;
+  Time second_end_ = 0;
+  int64_t in_market_ = 0;
+  int64_t max_pos_ = 0;
+};
+
 BacktestResult run_backtest(Strategy& strategy, const BacktestSpec& spec, const Config& base = {});
 BacktestResult run_backtest(StrategyId id, const double* params, const BacktestSpec& spec,
                             const Config& base = {});

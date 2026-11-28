@@ -272,7 +272,7 @@ export class Challenge {
     const t = s.time - this.startTime;
     if (!this.newsDone && t >= NEWS_AT) {
       this.newsDone = true;
-      app.engine.news(0.012 * this.newsSign);
+      app.news(0.012 * this.newsSign);
     }
     const left = Math.max(0, DURATION - t);
     setText(this.timeEl, `${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, '0')}`);
@@ -290,8 +290,7 @@ export class Challenge {
     if (!app.challengeActive) return;
     app.challengeActive = false;
     const elapsed = app.s.time - this.startTime;
-    app.engine.flatten();
-    app.pull();
+    app.flatten();
     const s = app.s;
     this.hud.hidden = true;
     this.hooks.armLadder(false);

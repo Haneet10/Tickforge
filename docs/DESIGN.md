@@ -168,11 +168,34 @@ The summary functions are tested against hand calculations (`engine/tests/test_b
 
 The backtester is part of the WebAssembly module (`tf_backtest` in `engine/wasm/api.cpp`). The lab runs it in a Web Worker with its own engine instance, so the live market and the terminal's animation are never blocked. A ten-minute session takes 15 to 20 ms; 100 sessions take under two seconds. Results arrive one session at a time; each new equity curve fades in over 450 ms, the numbers refresh four times a second, and the chart's scale eases to its new range instead of jumping.
 
-## 7. What this is not
+## 7. Replays
+
+### A session is a seed and a list of actions
+
+The terminal records every action that changes the market: orders, cancels, the TWAP, the quoting bot and its settings, the market dials, scenarios and the challenge's news. Each is stored with the simulated microsecond it happened, measured from the end of the warm-up (`web/src/replay/log.ts`). Speed, pause and the X-ray view are not recorded because they do not change the market. In a link, times are stored as deltas, the JSON is deflated with the browser's `CompressionStream` and base64url encoded into the URL fragment, so it never reaches a server. A ten-minute session with forty orders fits in a link of a few hundred characters. Links are validated field by field before anything runs, and capped at four hours and 20,000 actions, so a damaged or hostile link produces a readable message instead of a hang.
+
+### Why replaying is exact
+
+Two properties of the engine make this work, and both are tested rather than assumed (`engine/tests/test_backtest.cpp`, "replay" cases):
+
+1. **Slicing does not matter.** `Market::step` processes agent wake-ups, the 10 ms housekeeping tick and the end of each second in time order, with fixed tie-breaking, and only then stops at the requested time. Stepping to a time in one call or in a thousand ragged slices gives the same state. The test drives a live market in random frame-sized steps, acts between frames, then replays the log by jumping straight from one action to the next and compares the tape, the fills, the account and the book.
+2. **Actions land on the same microsecond.** `tf_step_to` steps to an exact integer time, so replay never accumulates floating-point drift from adding up frame durations. All the browser-side ways an action can be applied (live, replay, timeline preview) go through one function, `applyToEngine` in `web/src/replay/apply.ts`, so a replay cannot interpret an action differently from how it was taken.
+
+The end-to-end check runs in a real browser: trade at 16× speed, copy the link, open it in a fresh page, play to the end, and compare messages processed, trades, fills, position and P&L with the original. They match exactly.
+
+### Seeking
+
+Seeking backwards re-simulates from the seed rather than restoring snapshots. That is simpler and exact by construction, and fast enough: the warm-up runs at around 6 to 10 million messages a second in WebAssembly, so a seek into a ten-minute session takes 50 to 100 ms. Drags on the scrubber are coalesced to at most one seek per animation frame. A second, off-screen engine instance runs the whole session once when a replay opens to draw its price and P&L under the scrubber, like thumbnails on a video timeline.
+
+### Watching a lab session
+
+`run_backtest` used to be a single loop. It is now a `BacktestSession` that can be advanced to any time and resumed (`advance_to`), and `run_backtest` simply advances one to the end. The terminal's `tf_watch` creates the same object on the live market, and `tf_step` lets it drive the market a frame at a time. Because everything due at an instant happens in a fixed order (close the second, fire the scenario, let the strategy act) and partial steps only run the market, the session played out in the terminal is bit-for-bit the one the lab scored. A test drives every strategy through a flash crash in random slices from 1 µs to 70 ms and requires identical equity, position and mid series and identical metrics; the browser shows "same as the lab, to the cent" when a watched session ends.
+
+## 8. What this is not
 
 Tickforge is a simulation. The agents are simple models, not calibrated to any real stock, and the results are not evidence that any strategy would make money in a real market. Its purpose is to show the mechanics of a limit order market accurately and to make them visible.
 
-## References
+## 9. References
 
 - Avellaneda, M. and Stoikov, S. (2008). High-frequency trading in a limit order book. *Quantitative Finance* 8(3).
 - Kyle, A. S. (1985). Continuous auctions and insider trading. *Econometrica* 53(6).

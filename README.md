@@ -18,6 +18,7 @@ Nothing on the screen is a recording or a random walk. Every candle is built fro
 | **Run a market-making bot** | An Avellaneda-Stoikov quoting bot trades your account. A risk study replays it across 84 simulated sessions to show the trade-off between profit and risk. |
 | **Take the challenge** | Three minutes as the market maker, trading blind, with news hitting at some point. You are scored against the bot playing the same market from the same seed. |
 | **Backtest strategies** | The Strategy lab runs four strategies through dozens of simulated sessions on a background thread and shows every outcome, not one lucky run. |
+| **Replay and share** | Every session is recorded as its seed plus your actions. Scrub back through it, send it as a link, or open any lab session and watch the strategy trade it order by order. |
 
 ![A flash crash, and who paid for it](docs/img/flash-crash.png)
 
@@ -97,6 +98,16 @@ The result behaves like a real market in the ways that matter: spreads widen in 
 
 Your profit and loss is split exactly into three parts that always sum to the total: spread captured, inventory moves, and fees. Markouts show what the price did one, five and thirty seconds after each of your trades, which is how a trading desk tells whether the people it traded with knew more than it did.
 
+## Replays
+
+![Watching the trend follower trade a flash crash, opened from the lab](docs/img/replay.png)
+
+Press **Replay** in the top bar and Tickforge plays back everything you did in the current market, with a scrubber that shows the whole session's price and P&L and a tick for every order. **Copy link** turns the session into a URL of a few hundred characters; whoever opens it watches the same market, tick for tick. **Take over** at any moment keeps the market exactly as it is and hands it back to you.
+
+In the lab, click any equity curve (or *Watch median session*) and the terminal plays that session with the strategy trading it: its quotes in the book, its fills on the chart and the tape, its P&L in the account panel. When it finishes, the terminal checks its P&L against the one the lab reported. They agree to the cent, because the terminal drives the very same C++ session object the backtester does.
+
+There is no video and no snapshot. A session is its seed and a list of actions, each stamped with the simulated microsecond it happened. The engine is deterministic and does not care how time is sliced, so replaying re-simulates the market from the seed and lands each action on its original microsecond. Scrubbing backwards just re-simulates from the start: 45 minutes of warm-up plus a ten-minute session takes well under 100 ms. How this is kept honest is in [docs/DESIGN.md](docs/DESIGN.md#7-replays).
+
 ![The market-making bot and its risk study](docs/img/bot.png)
 
 ## Build it yourself
@@ -117,7 +128,7 @@ The web terminal (needs Python and Node 20 or newer):
 ```bash
 pip install ziglang==0.17.1        # the C++ to WebAssembly compiler
 ./scripts/build-wasm.sh
-cd web && npm ci && npm run dev
+cd web && npm ci && npm test && npm run dev
 ```
 
 ## Layout
@@ -131,6 +142,7 @@ engine/bench        throughput and latency benchmark
 engine/tools        headless simulator and backtester for the command line
 web/src             the terminal: TypeScript and canvas, no framework
 web/src/lab         the Strategy lab and its Web Worker
+web/src/replay      session recording, the replay player and scrubber, share links
 docs/DESIGN.md      design notes
 docs/roadmap.md     what is being built next
 ```
